@@ -1,19 +1,42 @@
-# aurmpd · 本地曲库点歌机版
+<div align="center">
+
+<img src="aurial/src/css/aurial_200.png" width="128" alt="点歌机">
+
+# 点歌机
+
+**局域网公共点歌机** · 本地曲库 · 多端同控 · 轻量
 
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/DragonTTDream/aurmpd-jukebox?label=release)](https://github.com/DragonTTDream/aurmpd-jukebox/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-informational)](#下载)
+[![Footprint](https://img.shields.io/badge/内存占用-约%2019%20MB-brightgreen)](#轻量适合低配设备)
 [![Based on](https://img.shields.io/badge/based%20on-breezecloud%2Faurmpd-lightgrey)](https://github.com/breezecloud/aurmpd)
+
+<sub>基于 [breezecloud/aurmpd](https://github.com/breezecloud/aurmpd)（GPL-2.0）修改 ｜ 上游 README 原文见 [docs/UPSTREAM-README.md](docs/UPSTREAM-README.md)</sub>
+
+</div>
 
 局域网内多人同时点歌的音乐播放器：**任何设备打开网页，看到的都是同一份播放队列、同一套控制**。
 
 浏览器界面负责浏览与点歌，播放由后台的 [mpd](https://www.musicpd.org/) 负责——
 关掉浏览器音乐不会停，多台设备之间状态实时同步。
 
-> **来源**：本项目是 [breezecloud/aurmpd](https://github.com/breezecloud/aurmpd)（GPL-2.0）的修改版，同样以 **GPL-2.0** 发布。
-> 上游 README 原文保留在 [`docs/UPSTREAM-README.md`](docs/UPSTREAM-README.md)　·　本仓库：<https://github.com/DragonTTDream/aurmpd-jukebox>
-
 ![主界面](docs/screenshots/01-main.png)
+
+## 轻量：适合低配设备
+
+实测（x86_64 Linux，空闲状态，无播放任务）：
+
+| 进程 | 常驻内存 (RSS) | 线程 | 空闲 CPU |
+| --- | --- | --- | --- |
+| `aurmpd`（HTTP/WS 服务 + 前端托管） | **约 2 MB** | 2 | ≈ 0% |
+| `mpd`（曲库扫描与播放） | 约 17 MB | 3 | ≈ 0% |
+| **合计** | **约 19 MB** | 5 | ≈ 0% |
+
+- 前端是静态单页资源（约 0.9 MB），由 `aurmpd` **自身托管**，不需要额外 Web 服务器
+- 没有数据库、没有常驻中间件；Windows 版就是一个可执行文件 + 一个 DLL（mpd 已内置）
+- 因此可用于：**软路由 / 树莓派等 ARM 小主机 / 旧笔记本 / NAS / 迷你主机 / 旧平板**
+- 曲库规模只影响 mpd 的扫描时间与硬盘占用，不影响常驻内存量级
 
 ## 下载
 
@@ -164,4 +187,5 @@ NODE_OPTIONS=--openssl-legacy-provider npm run dist   # 产物直出 ../build/ht
 
 - **上游**：[breezecloud/aurmpd](https://github.com/breezecloud/aurmpd)（GPL-2.0）—— 本项目的直接来源
 - **本仓库**：[DragonTTDream/aurmpd-jukebox](https://github.com/DragonTTDream/aurmpd-jukebox)（同样 **GPL-2.0**，保留上游版权声明与 `LICENSE`）
-- **致谢**：[aurial](https://github.com/shrimpza/aurial)（前端原型）、[mpd](https://www.musicpd.org/) / [libmpdclient](https://www.musicpd.org/libs/libmpdclient/)（播放与控制）、[mongoose](https://mongoose.ws)（网络层）
+- **致谢**：[aurial](https://github.com/shrimpza/aurial)（前端原型与图标，MIT）、[mpd](https://www.musicpd.org/) / [libmpdclient](https://www.musicpd.org/libs/libmpdclient/)（播放与控制）、[mongoose](https://mongoose.ws)（网络层）
+- **图标**：`aurial/src/css/aurial_200.png` 来自 [aurial](https://github.com/shrimpza/aurial)（MIT 许可，宽松协议，可随本项目以 GPL-2.0 一起分发）；上游 aurmpd 亦沿用同一图标

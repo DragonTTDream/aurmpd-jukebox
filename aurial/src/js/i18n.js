@@ -13,7 +13,7 @@
 export const STORAGE_KEY = 'lang';
 
 const en = {
-	'app.title': 'Aurmpd',
+	'app.title': 'Jukebox',
 	'app.github': 'Aurmpd on GitHub',
 	'app.upstream': 'Upstream',
 	'app.thisRepo': 'This fork',
@@ -186,7 +186,7 @@ const en = {
 };
 
 const zhCN = {
-	'app.title': 'Aurmpd',
+	'app.title': '点歌机',
 	'app.github': 'GitHub 上的 Aurmpd',
 	'app.upstream': '上游',
 	'app.thisRepo': '本仓库',
