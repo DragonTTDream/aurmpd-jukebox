@@ -646,3 +646,15 @@
 	line-height: 1.5;
 }
 .artistList .subsonic-hint .icon { margin-right: .35em; }
+
+/* 页头署名：上游弱化显示，本仓库强调，两者用箭头连接，一眼可辨 */
+.links .repo-link { text-decoration: none; }
+.links .repo-link .repo-name { margin-left: .35em; }
+.links .repo-link.upstream { opacity: .62; font-size: .92em; }
+.links .repo-link.upstream .repo-name { font-weight: 400; }
+.links .repo-link.fork { font-weight: 600; }
+.links .repo-sep { margin: 0 .5em; opacity: .5; }
+
+/* 设置页「关于」 */
+.about-box { line-height: 1.7; }
+.about-box .repo-note { opacity: .62; font-size: .92em; }

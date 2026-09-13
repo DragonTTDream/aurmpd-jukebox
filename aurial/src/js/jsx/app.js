@@ -1,4 +1,5 @@
 import { h, Component } from 'preact';
+import {UPSTREAM_URL, UPSTREAM_LABEL, REPO_URL, REPO_LABEL} from '../version'
 import Events from '../events'
 import PlayerExtras from '../playerextra'
 import Player from './player'
@@ -189,9 +190,16 @@ class Links extends Component {
 	render() {
 		return (
 			<div className="links">
-				<a href="https://github.com/breezecloud/aurmpd">
+				<a className="repo-link upstream" href={UPSTREAM_URL} title={UPSTREAM_LABEL}>
+					<i className="code branch icon"></i>
+					<span>{t('app.upstream')}</span>
+					<span className="repo-name">{UPSTREAM_LABEL}</span>
+				</a>
+				<span className="repo-sep">→</span>
+				<a className="repo-link fork" href={REPO_URL} title={REPO_LABEL}>
 					<i className="github icon"></i>
-					<span>{t('app.github')}</span>
+					<span>{t('app.thisRepo')}</span>
+					<span className="repo-name">{REPO_LABEL}</span>
 				</a>
 			</div>
 		);

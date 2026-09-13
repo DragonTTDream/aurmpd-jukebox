@@ -1,4 +1,5 @@
 import { h, Component } from 'preact';
+import {APP_VERSION, UPSTREAM_URL, UPSTREAM_LABEL, REPO_URL, REPO_LABEL, LICENSE_NAME} from '../version'
 import Subsonic from '../subsonic'
 import {UniqueID} from '../util'
 import {Messages} from './app'
@@ -288,7 +289,16 @@ export default class Settings extends Component {
 
 					<div className="ui section divider"></div>
 
-					<button className="ui blue button" type="submit">{t('settings.save')}</button>
+					<h3 className="ui dividing header">
+						{t('settings.about')}
+					</h3>
+					<div className="ui inverted segment about-box">
+						<p><strong>{t('settings.basedOn')}:</strong> <a href={UPSTREAM_URL} target="_blank" rel="noopener">{UPSTREAM_LABEL}</a> <span className="repo-note">({t('app.upstream')})</span></p>
+						<p><strong>{t('app.thisRepo')}:</strong> <a href={REPO_URL} target="_blank" rel="noopener">{REPO_LABEL}</a></p>
+						<p><strong>{t('settings.version')}:</strong> {APP_VERSION} &nbsp;·&nbsp; <strong>{t('settings.license')}:</strong> {LICENSE_NAME}</p>
+						<p className="repo-note">{t('settings.repoNote')}</p>
+					</div>
+										<button className="ui blue button" type="submit">{t('settings.save')}</button>
 					<button className="ui button" onClick={this.demo}>{t('settings.demo')}</button>
 					<button className="ui icon button" onClick={this.test}>
 						<i className={testIcon + " icon"}></i>
