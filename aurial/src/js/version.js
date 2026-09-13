@@ -5,7 +5,7 @@
  * REPO_*     ：本仓库（本项目当前的发布位置）
  * 界面上两者必须同时呈现并明确区分，让人一眼看出"基于哪个仓库修改、又在哪个仓库"。
  */
-export const APP_VERSION = 'v0.2.0-jukebox.1';
+export const APP_VERSION = 'v1.0.0';
 
 export const UPSTREAM_URL = 'https://github.com/breezecloud/aurmpd';
 export const UPSTREAM_LABEL = 'breezecloud/aurmpd';

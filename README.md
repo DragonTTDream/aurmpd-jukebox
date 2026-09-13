@@ -58,6 +58,46 @@
 
 > 每个页面/分栏的详细说明、HTTP 与 WebSocket 接口清单、排错手册，见 **[docs/FEATURES.md](docs/FEATURES.md)**。
 
+## 两个版本的区别（Windows / Linux）
+
+> 前端功能**完全相同**（中英双语、本地歌单、曲库检索、批量点歌、进度条跳转、手机端适配…），
+> 差异都在「运行方式」与「系统集成」上：
+
+| 能力 | **Windows 版**（`aurmpd-1.0.0-win64.zip`） | **Linux 版**（`aurmpd-1.0.0-linux-x86_64.tar.gz`） |
+| --- | --- | --- |
+| 一键启动（内含 mpd） | ✅ 自带 `mpd.exe`（0.23.9）与 `libmpdclient-2.dll` | ❌ 需自行安装并启动 mpd（`apt install mpd` 等） |
+| 启动方式 | 双击 `winaurmpd.exe`：后台运行 + 系统托盘图标，自动拉起 mpd 与 aurmpd | `./aurmpd`（前台运行，推荐用 systemd 托管） |
+| 系统托盘图标 | ✅ 可右键退出 / 开机自启 | ❌ 无 |
+| **开机自启** | ✅ **托盘右键**「开机自启」+ **设置页开关**（写当前用户注册表 `HKCU\...\Run`，**无需管理员权限**） | ❌ **不支持**（设置页会自动隐藏这一项）；请用 `systemctl enable` 托管服务 |
+| 首次配置 | 首次运行自动生成 `mpd.conf`；`music_directory` 的 `\` 会自动转成 `/` | 自行编写 `mpd.conf`（路径用**正斜杠**） |
+| 退出方式 | 托盘右键 → Exit（会连带结束 mpd 与 aurmpd） | `Ctrl+C` / `systemctl stop` |
+| 目录依赖 | 可任意解压目录（启动器会固定工作目录） | 建议从解压目录启动，或显式指定 `htdocs` 根目录 |
+| 端口与播放 | `0.0.0.0:8600`，多终端共享同一队列 | 同上，完全一致 |
+| 页面无鉴权 | 是（公共点歌机取舍，请只在可信局域网） | 同上 |
+
+**Linux 开机自启的正确做法**（系统级服务，比 Windows 注册表方式更规范）：
+
+```ini
+# /etc/systemd/system/aurmpd.service
+[Unit]
+Description=aurmpd local jukebox
+After=mpd.service network.target
+Wants=mpd.service
+
+[Service]
+ExecStart=/opt/aurmpd/aurmpd
+WorkingDirectory=/opt/aurmpd
+Restart=on-failure
+User=mpd
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now aurmpd
+```
+
 ## 快速开始
 
 ### Windows（推荐，开箱即用）
