@@ -8,6 +8,7 @@
 | 路径 | 作用 |
 | --- | --- |
 | `src/mpd_client.c/.h` | WS 命令表（`MPD_CMDS(X)` 宏）、mpd 连接与轮询线程、互斥锁 |
+| `src/audio_devices.c/.h` | 音频输出设备枚举（winmm / ALSA）、`audio_devices` JSON、mpd.conf 的 audio_output 读写（纯函数，可离线单测） |
 | `src/http_server.cpp` | REST 路由（`/api/*`）；**已知路由的方法校验在此**（不匹配返回 405） |
 | `src/mpdqueue.cpp/.hpp` | 内部队列 = mpd 队列的镜像（`syncFromMpd()`） |
 | `src/main.cpp` | 事件循环、退出标志（`volatile sig_atomic_t`）、Windows 管道线程 |
@@ -36,6 +37,9 @@ cd aurial && NODE_OPTIONS=--openssl-legacy-provider npm run dist
   **不要用 `waitUntil:'networkidle2'`**（页面从 cdnjs 加载 semantic-ui，永不 idle），用 `'domcontentloaded'` + 等待
 - **看不了图片**：模型无图像输入，排版结论必须来自 `getBoundingClientRect()` 几何量测；截图只给用户看
 - **不抢 8600**：需要独立实例时用 `unshare -rn sh -c 'ip link set lo up; cd build && ./aurmpd &'`
+  （真 mpd 集成检查：同一个 `unshare -rn` 里先 `mpd --no-daemon /home/loong/projects/aurmpd-testenv/mpd.conf &`）
+- **离线单测**（不需要 mpd / 声卡 / CMake）：`cd /tmp && gcc -I <repo>/src <repo>/test/audio_devices_test.c <repo>/src/audio_devices.c <repo>/src/json_encode.c -o t && ./t`；同一份用例可用 `x86_64-w64-mingw32-gcc ... -lwinmm` 编译后 `wine t.exe` 验证 Windows 代码路径
+- **前端断言（真浏览器 + 桩后端）**：`/tmp/pptr/wsstub.py`（静态站点 + 最小 WS，按 `SCENARIO` 回答新命令）+ `/tmp/pptr/check-audio.js`（用 harness 拦 CDN）
 - 有 Subsonic 相关改动时：`/tmp/fake-subsonic.py`（本地假服务器，8897，已带 CORS 与 `.view` 兼容）
 
 ## 发布流程（vX.Y.Z）

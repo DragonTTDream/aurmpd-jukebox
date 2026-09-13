@@ -359,6 +359,13 @@ Windows 官方包里 `.mpd/` 是 mpd 的数据目录（`playlist_directory`/`db_
 | `MPD_API_GET_PLAYLISTS` | — | 返回 `playlists` | `:304-306` |
 | `MPD_API_GET_PLAYLIST_SONGS` | `,name` | 返回 `playlist` | `:308-322` |
 | `MPD_API_RM_PLAYLIST` | `,name` | `mpd_run_rm` → 回 `playlists` | `:324-344` |
+| `MPD_API_GET_AUDIO_DEVICES` | — | 枚举本机音频输出设备，回 `audio_devices` | `:931-933` |
+| `MPD_API_SET_AUDIO_DEVICE` | `,id` | 应用该设备（Windows：改 `mpd.conf` + 请启动器重启 mpd），回同样的 `audio_devices` | `:934-936` |
+| `MPD_API_GET_AUTOSTART` | — | 回 `autostart` | `:927-929` |
+| `MPD_API_SET_AUTOSTART` | `,0\|1` | 写/删自启注册表项后回 `autostart` | `:924-926` |
+
+> 新增命令（本批）一律**追加在 `MPD_CMDS(X)` 末尾**，不插入中间，避免既有命令 id 位移。
+> `GET/SET_AUDIO_DEVICES` 与开机自启一样**不依赖 mpd 连接**（断线时也能查，见 `get_cmd_id` 后的白名单）。
 
 > `SET_MPDHOST`/`GET_MPDHOST`/`SET_MPDPASS`/`GET_DIRBLEAPITOKEN` 位于 `#ifdef WITH_MPD_HOST_CHANGE`（`:380-427`）内，**本机构建启用**（含 `src/config.h:26`；实测 `MPD_API_GET_OUTPUTS` 等均正常）。
 > 未识别命令（`get_cmd_id==-1`）**静默忽略**（`:118-119`）。连接未就绪（`conn_state != MPD_CONNECTED`）时，除上述 4 条外**所有命令被直接丢弃且不回包**（`:125-130`）。
@@ -381,6 +388,8 @@ Windows 官方包里 `.mpd/` 是 mpd 的数据目录（`playlist_directory`/`db_
 | `playlist` | `mpd_put_playlist_songs` `:862-903` | `{name,song:[{uri,pos,duration,title,artist,album}]}` |
 | `mpdhost` | `:401-405` | `{host,port,passwort_set}` |
 | `dirbleapitoken` | `:406-409` | `{data}` |
+| `audio_devices` | `mpd_api_get_audio_devices` `:250-257`（JSON 在 `src/audio_devices.c`） | `supported`(bool), `current`(string), `canSet`(bool), `devices[{id,name,kind}]`（`kind` = `winmm`/`alsa`/`pulse`） |
+| `autostart` | `mpd_put_autostart` `:205-211` | `supported`, `enabled` |
 
 ### 4.4 JSON 契约（客户端 → 服务端 POST body）
 
@@ -418,6 +427,7 @@ Windows 官方包里 `.mpd/` 是 mpd 的数据目录（`playlist_directory`/`db_
 | 本地歌单 全部 | `playlist.js:383-537` | `mpd_client.c:266-344`、`:824-903` |
 | 多端同步广播 | `player.js:47-69` | `mpd_notify_callback` `mpd_client.c:458-480` + `MG_EV_WAKEUP` `main.cpp:129-138` |
 | WS 连接与排队 | `mpdws.js:13-38` | `/ws` 升级 `main.cpp:110-114` |
+| 输出设备（扬声器）切换 | `settings.js`（`audio-output-field`） | `audio_devices.c`（枚举/JSON/改写 mpd.conf）+ `mpd_client.c:250-543`（SET 流程与队列恢复）+ `winmain.c:333-395`（重启 mpd） |
 
 ### 4.6 实测证据（本机 `:8600` 只读探针）
 
@@ -553,7 +563,7 @@ mpc -h 127.0.0.1 -p 6600 stats      # 确认 6600 上是哪个 mpd、曲库对�
 
 1. **无鉴权 + 绑定全网卡（刻意取舍）**：`0.0.0.0:8600`（`src/main.cpp:22`），HTTP 与 WS 均无任何认证/Origin 校验（`http_server.cpp`、`main.cpp:110-114`）。面向"局域网公共点歌机"是设计选择，但意味着**同一网段任何人都能完整控制播放、读曲库、枚举 mpd 输出，甚至切换 mpd 后端地址 / 设置 mpd 密码**（`MPD_API_SET_MPDHOST`/`SET_MPDPASS` 因 `WITH_MPD_HOST_CHANGE` 启用而在线可用，`src/mpd_client.c:382-426`）。
 2. **任意 URI 注入**：客户端 POST 的 `url` 被原样当 mpd uri（`http_server.cpp:101-106` → `mpdqueue.cpp:10`）。可以让 mpd 把任意路径当音频打开——仅限可信局域网。
-3. **mpd 单输出**：本机测试环境只有一个 `audio_output`（`type "null"`）。后端有 `MPD_API_GET_OUTPUTS`/`TOGGLE_OUTPUT`（`mpd_client.c:196-207`），但**页面上没有输出切换入口**（**未验证**是否存在隐藏入口）。Windows 包启动时生成的是系统默认输出（`src/winmain.c:285-296`）。
+3. **输出设备切换（v1.0.2）**：Windows 上设置页可选系统检测到的扬声器（见 §7.5）；Linux 上列得出设备但 `canSet:false`（不代改系统 mpd 配置），页面上「应用」置灰。后端另有一套与 UI 无关的**输出实例**开关 `MPD_API_GET_OUTPUTS`/`TOGGLE_OUTPUT`（`mpd_client.c:196-207`），页面仍无入口。Windows 包启动时生成的是 `type "winmm"` + 系统默认设备（`src/winmain.c:282-297`）。
 4. **Subsonic 相关功能在本地场景不可用**：艺术家/专辑浏览、服务器端歌单、搜索、scrobble 全部依赖 Subsonic 服务器；未配置时这些区域不渲染（`browser.js:63-90`、`playlist.js:184-187`），scrobble 静默不生效。
 5. **`persistQueue` 设置实际无效**：现役 `player.js` 不消费 `persist` prop（grep 无命中；仅存在废弃的 `player_audio.js`/`player_mpd.js` 中），且保存设置时 `appSettings` 未带 `persistQueue`（`settings.js:66-71` vs `app.js:95-99`）。**队列持久化目前不可用**。
 6. **退出即清空队列**：`mpd_clear_all()`（`mpd_client.c:958-984`）在退出时停止播放、清空队列。重启后播放队列丢失，与「队列放后台」的卖点冲突。且只处理 `SIGINT`（`src/main.cpp:164`），`kill`/`systemd stop` 走不到清理路径。
@@ -564,7 +574,7 @@ mpc -h 127.0.0.1 -p 6600 stats      # 确认 6600 上是哪个 mpd、曲库对�
 11. **前端产物未压缩**：uglify 被注释（`webpack.dist.config.js:19-26`），`index.js` ~0.9 MB。
 12. **前端仓库含死代码**：`jsx/player_mpd.js`、`jsx/player_audio.js`、`jsx/browser_bak.js` 未被现役入口引用（`app.js:4` 只引 `./player`），且 `player_mpd.js` 引用了不存在的 `../soaprequest.js`——一旦被引入即构建失败。
 13. **`diagnose.cmd` 不存在**：全仓无 `*.cmd`/`diagnose*` 文件；`test/` 仅有一个 `README.TXT`。**未验证**。
-14. **未验证项汇总**：手动 `Scan library` 是否有"扫描完成"回执（**未验证**）；Windows `libmpdclient-2.dll` 的确切版本要求（**未验证**）；是否存在输出切换 UI（**未验证**）；语言/i18n 设置（不存在）。
+14. **未验证项汇总**：手动 `Scan library` 是否有"扫描完成"回执（**未验证**）；Windows `libmpdclient-2.dll` 的确切版本要求（**未验证**）；语言/i18n 设置（不存在）；**真机上切换音频输出设备后是否真的从新设备出声、以及队列是否完整恢复（无真 Windows/声卡，未验证，验证步骤见 §7.5）**。
 
 ---
 
@@ -596,3 +606,28 @@ mpc -h 127.0.0.1 -p 6600 stats      # 确认 6600 上是哪个 mpd、曲库对�
 | 实现位置 | 后端 `src/mpd_client.c`（`AUTOSTART_RUN_KEY` / `autostart_get_enabled` / `autostart_set_enabled`）；启动器 `src/winmain.c`（`IDM_AUTOSTART`） |
 
 > 验证边界：注册表读写已在 wine 环境实测（开→值写入、关→值消失）；**真实开机自启流程需在真机验证**（勾选后注销/重启，看托盘是否自动出现）。
+
+### 7.5 输出设备（扬声器）切换（v1.0.2）
+
+**功能**：设置页新增「输出设备 / Audio output」分区，列出系统检测到的播放设备，可下拉选择 + 「刷新」/「应用」。
+
+| 项 | 实现 |
+| --- | --- |
+| 后端命令 | `MPD_API_GET_AUDIO_DEVICES` → `{"type":"audio_devices","data":{supported,current,canSet,devices[{id,name,kind}]}}`；`MPD_API_SET_AUDIO_DEVICE,<id>` 应用后回**同样的 JSON**（`current` 为生效值） |
+| 设备枚举（Windows） | winmm：`waveOutGetNumDevs()` + `waveOutGetDevCapsW()`（`src/audio_devices.c`）。首项是「System default」（= mpd.conf 不写 `device`，即 WAVE_MAPPER），其后每项 `id=winmm:<序号>`、`arg=<序号>` |
+| 为什么不用 wasapi | 内置 mpd 0.23.9 同时含 `winmm` 与 `wasapi`（`mpd --version` 实测）。两者 `device` 都接受**序号或名字**，但**序号空间不同**：winmm 是 `waveOut*` 设备序号，wasapi 是 `IMMDeviceEnumerator` 枚举序号（`src/output/plugins/wasapi/WasapiOutputPlugin.cxx` 的 `GetDevice`/`SearchDevice`）。启动器生成的 mpd.conf 就是 `type "winmm"`，本批只管理 winmm，保证「我们列出的序号 == mpd 解析的序号」；wasapi 留作后续（需同时改启动器模板与 UI 语义）。 |
+| 设备枚举（Linux） | `/proc/asound/pcm` 的每个 playback PCM（`id=alsa:hw:<card>,<dev>`）→ 退化到 `/proc/asound/cards` → 退化到 PulseAudio socket。`supported` = 是否列到设备；**`canSet` 恒为 false** |
+| 生效机制（Windows） | mpd 由启动器 `winaurmpd.exe` 持有。`SET_AUDIO_DEVICE` 的流程：① `waveOutOpen` 试开目标设备（不通过直接拒绝，不写配置）② 把当前队列/播放状态存到 `.mpd/aurmpd-restart-queue` ③ 改 `mpd.conf` 里第一个 `audio_output` 的 `device`（临时文件 + 原子替换；缩进、其它行、其它配置逐字节不动）④ 写请求文件 `.mpd/restart-request` ⑤ 启动器 1s 定时器（`IDT_RESTART_CHECK`）看到请求文件 → 结束旧 mpd → 用同一命令行重新拉起（**新进程同样加入 Job 对象**，启动器退出不残留）→ 删请求文件 → 写 `.mpd/restart-result` ⑥ mpd 重连成功后恢复队列并把新的 `audio_devices` 广播给所有客户端 |
+| 队列是否会丢 | **不会（已做保存/恢复）**。队列在 mpd 侧，而启动器是用 `TerminateProcess` 结束 mpd 的 —— 即使 mpd.conf 配了 `state_file` 也**不会**在此时落盘，所以不能指望 mpd 自己恢复。这里显式保存队列 URI（每行 `uri <百分号转义>`）+ `state/volume/songpos/repeat/single/random/consume/crossfade`，重启后 `clear` + 逐条 `add` + 恢复状态/播放位置，然后删除存档。存档文件属于本程序私有（`.mpd/aurmpd-restart-queue`），不污染用户歌单目录 |
+| 失败可见 | 试开失败 / 改配置失败 / 写请求失败 → WS 回 `{"type":"error","data":...}`，前端弹错误提示；请求发出后 25s 内 mpd 没连上 → 轮询线程再回一条 `error`（附启动器结果文件内容），前端同样弹提示，不静默 |
+| 前端 | `aurial/src/js/jsx/settings.js`：`audio-output-field` / `audio-device-select` / `audio-refresh-button` / `audio-apply-button`。`supported!==true` 时**整块不渲染**（与「开机自启」一致）；`canSet:false` 时下拉与「应用」禁用并显示「手改 mpd.conf」提示；应用成功后自动重查一次校准 |
+| 词条 | `settings.audioOutput/audioApply/audioRefresh/audioManualHint/audioApplied/audioFailed/audioFailedDetail`（中英两套） |
+| 本机实测 | Linux（`/proc/asound` 有两张卡）：`supported:true, canSet:false`，列出 3 个 ALSA playback 设备；`SET` 回 `audio output switching is not supported on this platform` |
+
+**真机验证步骤（本机无真 Windows / wine 无声卡，以下均为未验证）**：
+
+1. 真 Windows 上启动 `winaurmpd.exe`，打开 `http://127.0.0.1:8600` → 设置页应出现「输出设备」，下拉里有若干 `winmm:N`（来自 `waveOut`）与首项 System default，且「应用」可用。
+2. 选一个**非当前**设备（例如插上 USB 耳机的那个）→ 点「应用」：期望立即出现成功提示；`<安装目录>\.mpd\restart-request` 短暂出现后消失，`\.mpd\restart-result` 内容为 `ok`；`mpd.conf` 的 `audio_output` 多出 `device "N"`。
+3. 期望现象：播放中的音乐短暂中断（约 1-3 秒）后从新设备出声；队列内容与播放位置保持不变（对照操作前的队列页）。
+4. 反向验证：任务管理器里应只有一个 `mpd.exe`；托盘 Exit 后 `mpd.exe`/`aurmpd.exe` 都不残留（Job 对象生效）。
+5. 失败路径：把设备换成硬件已拔掉的那个（或直接改 `mpd.conf` 写个越界序号）→ 期望前端弹错误、mpd 不被写坏、`mpd.conf` 仍是可启动的配置。

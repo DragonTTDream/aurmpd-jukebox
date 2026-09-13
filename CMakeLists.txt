@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/cmake/")
 set(CPACK_PACKAGE_VERSION_MAJOR "1")
 set(CPACK_PACKAGE_VERSION_MINOR "0")
-set(CPACK_PACKAGE_VERSION_PATCH "0")
+set(CPACK_PACKAGE_VERSION_PATCH "2")
 
 option(WITH_IPV6 "enable IPv6 support" ON)
 
@@ -57,6 +57,7 @@ set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -ggdb -pedantic")
 set(SOURCES
     src/main.cpp
     src/mpd_client.c
+    src/audio_devices.c
     src/mongoose.c
     src/json_encode.c
     src/http_server.cpp
@@ -72,7 +73,8 @@ if(WIN32)
     target_link_libraries(winaurmpd PRIVATE ws2_32  ${OLE32_LIBRARY} ${UUID_LIBRARY}) 
 
     add_executable(aurmpd ${SOURCES} src/winpipe.cpp)
-    target_link_libraries(aurmpd ${LIBMPDCLIENT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT} ${OPENSSL_LIBRARIES} ws2_32) 
+    # winmm：音频输出设备枚举（waveOut*），见 src/audio_devices.c
+    target_link_libraries(aurmpd ${LIBMPDCLIENT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT} ${OPENSSL_LIBRARIES} ws2_32 winmm) 
 elseif(UNIX)
     add_executable(aurmpd ${SOURCES})
     target_link_libraries(aurmpd ${LIBMPDCLIENT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT} ${OPENSSL_LIBRARIES}) 

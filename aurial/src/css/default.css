@@ -658,3 +658,9 @@
 /* 设置页「关于」 */
 .about-box { line-height: 1.7; }
 .about-box .repo-note { opacity: .62; font-size: .92em; }
+
+/* 设置页「输出设备」：下拉 + 刷新/应用按钮一行放置，窄屏自动换行 */
+.audio-output-controls { display: flex; align-items: center; flex-wrap: wrap; gap: .5em; }
+.audio-output-controls .audio-device-select { flex: 1 1 240px; min-width: 180px; max-width: 100%; }
+.audio-output-controls .ui.button { margin: 0; }
+.audio-output-field .audio-output-hint { display: block; margin-top: .6em; white-space: normal; }

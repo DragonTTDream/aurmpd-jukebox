@@ -27,6 +27,13 @@ typedef int bool;
 // 开机自启勾选项（100~102 已被占用，勿冲突）
 #define IDM_AUTOSTART 103
 
+// 定时器 ID：检查「音频输出设备切换」重启请求
+#define IDT_RESTART_CHECK 1002
+
+// 音频输出设备切换：aurmpd 写好 mpd.conf 后留下请求文件，启动器看到就重启 mpd
+#define RESTART_REQUEST_FILE L".mpd\\restart-request"
+#define RESTART_RESULT_FILE  L".mpd\\restart-result"
+
 #define TARGET_URL L"http://127.0.0.1:8600"
 #define PIPE_NAME L"\\\\.\\pipe\\AurmpdPipe"
 #define BUFFER_SIZE 1024
@@ -320,6 +327,76 @@ BOOL CheckAndCopyFiles() {
     return TRUE;
 }
 
+// 启动 mpd 子进程（首次启动与「切换音频输出后重启」共用）。
+// 新进程一律 AssignProcessToJobObject 到 g_job，这样启动器无论怎么退出
+// （正常 / 崩溃 / 任务管理器结束）都会连带结束 mpd，不会残留。
+static BOOL StartMpdProcess(void) {
+    STARTUPINFOW si = { sizeof(STARTUPINFOW) };
+    PROCESS_INFORMATION pi;
+    wchar_t command[MAX_PATH * 3];
+
+    si.cb = sizeof(STARTUPINFOW);
+    si.wShowWindow = SW_HIDE; // 隐藏子进程窗口
+    si.dwFlags |= STARTF_USESHOWWINDOW;
+
+    // 子进程与命令行路径一律用 exe 目录下的绝对路径
+    if (g_exeDir[0] != L'\0') {
+        _snwprintf(command, MAX_PATH * 3, L"\"%s\\mpd.exe\" \"%s\\mpd.conf\"", g_exeDir, g_exeDir);
+    } else {
+        wcscpy(command, L"mpd.exe mpd.conf");
+    }
+
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL,
+                        g_exeDir[0] ? g_exeDir : NULL, &si, &pi)) {
+        return FALSE;
+    }
+    if (hChildProcess_mpd != NULL) {
+        CloseHandle(hChildProcess_mpd);
+    }
+    hChildProcess_mpd = pi.hProcess;
+    AssignChildToJob(pi.hProcess);
+    CloseHandle(pi.hThread); // 不需要线程句柄
+    return TRUE;
+}
+
+// 把重启结果写进 .mpd\restart-result，供 aurmpd 回一条可见错误/日志
+static void WriteRestartResult(BOOL ok) {
+    HANDLE h = CreateFileW(RESTART_RESULT_FILE, GENERIC_WRITE, 0, NULL,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        const char* text = ok ? "ok\r\n" : "failed to restart mpd.exe\r\n";
+        DWORD written = 0;
+        WriteFile(h, text, (DWORD)strlen(text), &written, NULL);
+        CloseHandle(h);
+    }
+}
+
+// 检查 aurmpd 是否请求重启 mpd（切换音频输出设备）；返回时请求文件已删除
+static void CheckMpdRestartRequest(void) {
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    BOOL ok;
+
+    if (!GetFileAttributesExW(RESTART_REQUEST_FILE, GetFileExInfoStandard, &fad)) {
+        return;
+    }
+    OutputDebugStringA("aurmpd: restart-request detected, restarting mpd\n");
+
+    // 旧进程先请它退出，超时就强杀（与退出流程同一套逻辑）
+    if (hChildProcess_mpd != NULL) {
+        if (WaitForSingleObject(hChildProcess_mpd, 0) != WAIT_OBJECT_0) {
+            GracefullyCloseProcess(hChildProcess_mpd);
+            WaitForSingleObject(hChildProcess_mpd, 5000);
+        }
+        CloseHandle(hChildProcess_mpd);
+        hChildProcess_mpd = NULL;
+    }
+
+    ok = StartMpdProcess();
+    DeleteFileW(RESTART_REQUEST_FILE);
+    WriteRestartResult(ok);
+    OutputDebugStringA(ok ? "aurmpd: mpd restarted\n" : "aurmpd: failed to restart mpd\n");
+}
+
 // 处理窗口消息的回调函数
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -364,21 +441,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             si.wShowWindow = SW_HIDE; // 隐藏子进程窗口
             si.dwFlags |= STARTF_USESHOWWINDOW;
             PROCESS_INFORMATION pi;
-            // 创建mpd子进程：子进程与命令行路径一律用 exe 目录下的绝对路径
-            wchar_t command1[MAX_PATH * 3];
-            if (g_exeDir[0] != L'\0') {
-                _snwprintf(command1, MAX_PATH * 3, L"\"%s\\mpd.exe\" \"%s\\mpd.conf\"", g_exeDir, g_exeDir);
-            } else {
-                wcscpy(command1, L"mpd.exe mpd.conf");
-            }
-            if (!CreateProcessW(NULL, command1, NULL, NULL, FALSE, 0, NULL, g_exeDir[0] ? g_exeDir : NULL, &si, &pi)) {
+            // 创建mpd子进程（带托盘图标后立刻启动；音频输出切换后的重启也用同一个函数）
+            if (!StartMpdProcess()) {
                 MessageBox(hwnd, "Failed to start mpd process", "Error", MB_OK | MB_ICONERROR);
-            } else {
-                // 保存子进程的句柄
-                hChildProcess_mpd = pi.hProcess;
-                AssignChildToJob(pi.hProcess);
-                // 关闭线程句柄，因为我们不需要它
-                CloseHandle(pi.hThread);           
             }
             // 创建aurmpd子进程   
             wchar_t command2[MAX_PATH * 2];
@@ -400,9 +465,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // 启动后打开浏览器并访问指定网址
             ShowWindow(hwnd, SW_HIDE); 
             ShellExecuteW(hwnd, L"open", TARGET_URL, NULL, NULL, SW_SHOWNOACTIVATE);
+
+            // 定时检查「音频输出设备切换」请求（aurmpd 写 .mpd\restart-request）
+            SetTimer(hwnd, IDT_RESTART_CHECK, 1000, NULL);
             break;
         }
-        case WM_DESTROY: {          
+        case WM_TIMER: {
+            // 1s 一次的「请求重启 mpd」检查（切换音频输出设备用）
+            if (wParam == IDT_RESTART_CHECK) {
+                CheckMpdRestartRequest();
+            }
+            break;
+        }
+        case WM_DESTROY: {
+            KillTimer(hwnd, IDT_RESTART_CHECK);
             // 移除系统托盘图标
             NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
             nid.hWnd = hwnd;

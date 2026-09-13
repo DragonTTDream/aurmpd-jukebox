@@ -23,6 +23,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <time.h>
 #include <libgen.h>
 #include <mpd/client.h>
 #include <mpd/message.h>
@@ -30,6 +32,7 @@
 #include "mpd_client.h"
 #include "config.h"
 #include "json_encode.h"
+#include "audio_devices.h"
 
 /*
  * Coarse-grained recursive mutex around the single shared libmpdclient
@@ -207,6 +210,339 @@ static int mpd_put_autostart(char *buffer, int enabled)
                     enabled ? "true" : "false");
 }
 
+/* ==================================================================
+ * 音频输出设备（扬声器）
+ *
+ * Windows：
+ *   - 设备表用 winmm（waveOutGetNumDevs/waveOutGetDevCapsW）枚举，序号与 mpd
+ *     winmm 插件的 device 参数同一套语义（插件自己也是 waveOutGetNumDevs +
+ *     strtoul/名字前缀匹配）。
+ *   - mpd 的 audio_output 是配置项，改完必须重启 mpd 才生效；而 mpd 由启动器
+ *     （winaurmpd.exe）持有，所以这里的流程是：
+ *       1) 试开目标设备（waveOutOpen）确认可用，避免把 mpd 写死在一个坏设备上
+ *       2) 保存当前队列到 .mpd/aurmpd-restart-queue（mpd 重启会丢队列）
+ *       3) 改写 mpd.conf 的 audio_output.device
+ *       4) 写请求文件 .mpd/restart-request，启动器的定时器（1s）看到后
+ *          重启 mpd（新进程仍由启动器创建，因此仍在同一个 Job 对象里，
+ *          启动器退出时不会残留），并写 .mpd/restart-result
+ *       5) mpd 重连成功后恢复队列，并把新的设备状态广播给所有客户端
+ *       6) 超时（AUDIO_RESTART_TIMEOUT 秒）仍未连上 -> 回可见错误，不静默
+ * Linux：能列出设备（supported=true），但 canSet=false，前端禁用「应用」
+ *        并提示手改 mpd.conf。
+ * ================================================================== */
+#define AUDIO_QUEUE_FILE     ".mpd/aurmpd-restart-queue"
+#define AUDIO_REQUEST_FILE   ".mpd/restart-request"
+#define AUDIO_RESULT_FILE    ".mpd/restart-result"
+#define AUDIO_RESTART_TIMEOUT 25
+
+static int s_audio_restart_pending = 0;
+static time_t s_audio_restart_deadline = 0;
+
+/* {"type":"error","data":"<msg>"}（转义交给 json_emit_quoted_str） */
+static int audio_err(char *buffer, const char *msg)
+{
+    int n = json_emit_raw_str(buffer, MAX_SIZE, "{\"type\":\"error\",\"data\":");
+    n += json_emit_quoted_str(buffer + n, MAX_SIZE - n, msg);
+    n += json_emit_raw_str(buffer + n, MAX_SIZE - n, "}");
+    return n;
+}
+
+static int mpd_api_get_audio_devices(char *buffer)
+{
+    struct audio_output_info info;
+    struct audio_device devs[AUDIO_DEVICE_MAX];
+    int ndev = audio_devices_enumerate(&info, devs, AUDIO_DEVICE_MAX);
+
+    return audio_devices_json(buffer, MAX_SIZE, &info, devs, ndev);
+}
+
+#ifdef _WIN32
+
+/* URI 按行存盘：转义 % 与控制字符（文件名里可能有空格，不能用空格分词） */
+static void uri_encode(const char *uri, char *out, size_t outlen)
+{
+    size_t o = 0;
+
+    for (; *uri != '\0' && o + 4 < outlen; uri++) {
+        unsigned char c = (unsigned char)*uri;
+        if (c == '%' || c == '\n' || c == '\r' || c < 0x20)
+            o += (size_t)snprintf(out + o, outlen - o, "%%%02X", c);
+        else
+            out[o++] = (char)c;
+    }
+    out[o] = '\0';
+}
+
+static void uri_decode(const char *in, char *out, size_t outlen)
+{
+    size_t o = 0;
+
+    while (*in != '\0' && o + 1 < outlen) {
+        if (in[0] == '%' && isxdigit((unsigned char)in[1]) && isxdigit((unsigned char)in[2])) {
+            char hex[3] = { in[1], in[2], '\0' };
+            out[o++] = (char)strtol(hex, NULL, 16);
+            in += 3;
+        } else {
+            out[o++] = *in++;
+        }
+    }
+    out[o] = '\0';
+}
+
+/* 保存 mpd 当前队列与播放状态；返回 0 表示「可以恢复」（文件已写好），
+ * 非 0 表示没保存（队列为空 / mpd 未连接 / 出错）——此时重启会清空队列，
+ * 前端会看到提示。 */
+static int audio_queue_save(void)
+{
+    struct mpd_status *st;
+    struct mpd_song *song;
+    FILE *f;
+    unsigned n = 0;
+    int rc = 0;
+
+    if (mpd.conn == NULL) return -1;
+
+    st = mpd_run_status(mpd.conn);
+    if (st == NULL) {
+        fprintf(stderr, "AUDIO: queue save: %s\n", mpd_connection_get_error_message(mpd.conn));
+        mpd_connection_clear_error(mpd.conn);
+        return -1;
+    }
+    if (mpd_status_get_queue_length(st) == 0) {
+        mpd_status_free(st);
+        return -1; /* 空队列，没什么可存 */
+    }
+
+    f = fopen(AUDIO_QUEUE_FILE, "wb");
+    if (f == NULL) {
+        mpd_status_free(st);
+        fprintf(stderr, "AUDIO: cannot open %s\n", AUDIO_QUEUE_FILE);
+        return -1;
+    }
+    fprintf(f, "aurmpd-restart-queue v1\n");
+    fprintf(f, "state %d\nvolume %d\nsongpos %d\n",
+            (int)mpd_status_get_state(st), mpd_status_get_volume(st),
+            mpd_status_get_song_pos(st));
+    fprintf(f, "repeat %d\nsingle %d\nrandom %d\nconsume %d\ncrossfade %d\n",
+            mpd_status_get_repeat(st), mpd_status_get_single(st),
+            mpd_status_get_random(st), mpd_status_get_consume(st),
+            mpd_status_get_crossfade(st));
+    mpd_status_free(st);
+
+    if (mpd_send_list_queue_meta(mpd.conn)) {
+        while ((song = mpd_recv_song(mpd.conn)) != NULL) {
+            const char *uri = mpd_song_get_uri(song);
+            if (uri != NULL) {
+                char enc[AUDIO_NAME_MAX * 4];
+                uri_encode(uri, enc, sizeof(enc));
+                fprintf(f, "uri %s\n", enc);
+                n++;
+            }
+            mpd_song_free(song);
+        }
+        if (!mpd_response_finish(mpd.conn) ||
+            mpd_connection_get_error(mpd.conn) != MPD_ERROR_SUCCESS) {
+            fprintf(stderr, "AUDIO: queue save: %s\n", mpd_connection_get_error_message(mpd.conn));
+            mpd_connection_clear_error(mpd.conn);
+            rc = -1;
+        }
+    } else {
+        fprintf(stderr, "AUDIO: queue save: %s\n", mpd_connection_get_error_message(mpd.conn));
+        mpd_connection_clear_error(mpd.conn);
+        rc = -1;
+    }
+    fclose(f);
+
+    if (rc != 0 || n == 0) {
+        remove(AUDIO_QUEUE_FILE);
+        return -1;
+    }
+    fprintf(stderr, "AUDIO: saved %u queue entries for restart\n", n);
+    return 0;
+}
+
+/* mpd 重启后恢复队列与播放状态；成功或失败都会删掉 save 文件（避免反复恢复旧队列） */
+static void audio_queue_restore(void)
+{
+    FILE *f;
+    char line[2048];
+    char **uris = NULL;
+    size_t nuris = 0, cap = 0, i;
+    int state = -1, volume = -1, songpos = -1;
+    int repeat = 0, single = 0, random = 0, consume = 0, crossfade = 0;
+    int ok = 1;
+
+    if (mpd.conn == NULL) return;
+    f = fopen(AUDIO_QUEUE_FILE, "rb");
+    if (f == NULL) return;
+
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *nl = strchr(line, '\n');
+        if (nl != NULL) *nl = '\0';
+        if (strncmp(line, "state ", 6) == 0) state = atoi(line + 6);
+        else if (strncmp(line, "volume ", 7) == 0) volume = atoi(line + 7);
+        else if (strncmp(line, "songpos ", 8) == 0) songpos = atoi(line + 8);
+        else if (strncmp(line, "repeat ", 7) == 0) repeat = atoi(line + 7);
+        else if (strncmp(line, "single ", 7) == 0) single = atoi(line + 7);
+        else if (strncmp(line, "random ", 7) == 0) random = atoi(line + 7);
+        else if (strncmp(line, "consume ", 8) == 0) consume = atoi(line + 8);
+        else if (strncmp(line, "crossfade ", 10) == 0) crossfade = atoi(line + 10);
+        else if (strncmp(line, "uri ", 4) == 0) {
+            char dec[AUDIO_NAME_MAX * 4];
+            uri_decode(line + 4, dec, sizeof(dec));
+            if (dec[0] == '\0') continue;
+            if (nuris == cap) {
+                char **tmp;
+                size_t ncap = cap ? cap * 2 : 64;
+                if (ncap > 5000) break;
+                tmp = (char **)realloc(uris, ncap * sizeof(char *));
+                if (tmp == NULL) { ok = 0; break; }
+                uris = tmp;
+                cap = ncap;
+            }
+            uris[nuris] = strdup(dec);
+            if (uris[nuris] == NULL) { ok = 0; break; }
+            nuris++;
+        }
+    }
+    fclose(f);
+
+    if (nuris == 0) goto out;
+
+    if (!mpd_run_clear(mpd.conn)) {
+        fprintf(stderr, "AUDIO: queue restore: clear failed: %s\n",
+                mpd_connection_get_error_message(mpd.conn));
+        mpd_connection_clear_error(mpd.conn);
+        ok = 0;
+        goto out;
+    }
+    for (i = 0; i < nuris; i++) {
+        if (!mpd_run_add(mpd.conn, uris[i])) {
+            fprintf(stderr, "AUDIO: queue restore: add \"%s\" failed: %s\n", uris[i],
+                    mpd_connection_get_error_message(mpd.conn));
+            mpd_connection_clear_error(mpd.conn);
+            ok = 0;
+            break;
+        }
+    }
+    if (ok) {
+        if (volume >= 0) mpd_run_set_volume(mpd.conn, (unsigned)volume);
+        mpd_run_repeat(mpd.conn, repeat != 0);
+        mpd_run_random(mpd.conn, random != 0);
+        mpd_run_consume(mpd.conn, consume != 0);
+        mpd_run_single(mpd.conn, single != 0);
+        mpd_run_crossfade(mpd.conn, (unsigned)(crossfade > 0 ? crossfade : 0));
+        if (songpos >= 0 && state == MPD_STATE_PLAY) {
+            mpd_run_play_pos(mpd.conn, (unsigned)songpos);
+        } else if (songpos >= 0 && state == MPD_STATE_PAUSE) {
+            if (mpd_run_play_pos(mpd.conn, (unsigned)songpos))
+                mpd_run_pause(mpd.conn, true);
+        }
+    }
+
+out:
+    for (i = 0; i < nuris; i++) free(uris[i]);
+    free(uris);
+    remove(AUDIO_QUEUE_FILE);
+    fprintf(stderr, "AUDIO: queue restore %s (%lu entries)\n",
+            ok && nuris ? "ok" : "skipped/failed", (unsigned long)nuris);
+}
+
+/* 写「请启动器重启 mpd」的请求文件（.mpd 不存在时兜底创建） */
+static int audio_write_restart_request(const char *id)
+{
+    FILE *f = fopen(AUDIO_REQUEST_FILE, "wb");
+
+    if (f == NULL) {
+        CreateDirectoryA(".mpd", NULL);
+        f = fopen(AUDIO_REQUEST_FILE, "wb");
+        if (f == NULL) {
+            fprintf(stderr, "AUDIO: cannot write %s\n", AUDIO_REQUEST_FILE);
+            return -1;
+        }
+    }
+    fprintf(f, "%s\n", id);
+    fclose(f);
+    return 0;
+}
+
+/* 读启动器写的结果文件（读到返回 0 并删除文件） */
+static int audio_read_restart_result(char *out, size_t outlen)
+{
+    FILE *f;
+    size_t l;
+
+    if (outlen) out[0] = '\0';
+    f = fopen(AUDIO_RESULT_FILE, "rb");
+    if (f == NULL) return -1;
+    if (fgets(out, (int)outlen, f) == NULL && outlen) out[0] = '\0';
+    fclose(f);
+    remove(AUDIO_RESULT_FILE);
+    l = strlen(out);
+    while (l > 0 && (out[l - 1] == '\n' || out[l - 1] == '\r')) out[--l] = '\0';
+    return 0;
+}
+
+#else /* 非 Windows：不存在自动切换；只留公共路径会调用到的两个空实现 */
+static void audio_queue_restore(void) {}
+static int audio_read_restart_result(char *out, size_t outlen)
+{
+    if (outlen) out[0] = '\0';
+    return -1;
+}
+
+#endif /* _WIN32 */
+
+static int mpd_api_set_audio_device(const char *cmd, char *buffer)
+{
+#ifndef _WIN32
+    (void)cmd;
+    return audio_err(buffer, "audio output switching is not supported on this platform");
+#else
+    static const char prefix[] = "MPD_API_SET_AUDIO_DEVICE,";
+    struct audio_output_info info;
+    struct audio_device devs[AUDIO_DEVICE_MAX];
+    char err[256];
+    const char *id;
+    int ndev, i, found = -1, qsaved;
+
+    ndev = audio_devices_enumerate(&info, devs, AUDIO_DEVICE_MAX);
+
+    if (strncmp(cmd, prefix, sizeof(prefix) - 1) != 0 || cmd[sizeof(prefix) - 1] == '\0')
+        return audio_err(buffer, "malformed audio device command");
+    id = cmd + sizeof(prefix) - 1;
+
+    for (i = 0; i < ndev; i++) {
+        if (strcmp(devs[i].id, id) == 0) { found = i; break; }
+    }
+    if (found < 0)
+        return audio_err(buffer, "unknown audio device");
+    if (!info.can_set)
+        return audio_err(buffer, "the configured mpd audio_output is not managed by this build");
+
+    /* 先把设备试开一次：失败就别写配置，否则 mpd 重启后会起不来 */
+    if (audio_device_check(&devs[found], err, sizeof(err)) != 0)
+        return audio_err(buffer, err);
+
+    /* 队列在 mpd 侧，重启 mpd 会丢 —— 先存一份，重连后自动恢复 */
+    qsaved = (mpd.conn_state == MPD_CONNECTED) ? audio_queue_save() : -1;
+
+    if (audio_conf_set_device("mpd.conf", devs[found].arg, err, sizeof(err)) != 0)
+        return audio_err(buffer, err);
+
+    if (audio_write_restart_request(devs[found].id) != 0)
+        return audio_err(buffer, "cannot write .mpd/restart-request (is winaurmpd.exe running here?)");
+
+    s_audio_restart_pending = 1;
+    s_audio_restart_deadline = time(NULL) + AUDIO_RESTART_TIMEOUT;
+    fprintf(stderr, "AUDIO: restart requested (device %s, queue %s)\n",
+            devs[found].id, qsaved == 0 ? "saved" : "NOT saved");
+
+    /* 回复应用后的实际状态（读回 mpd.conf） */
+    return mpd_api_get_audio_devices(buffer);
+#endif
+}
+
 /* 内部队列与 mpd 的同步状态：首次连接后（s_queue_synced==0）强制同步一次，
  * 之后只在 mpd queue_version 变化时同步（外部 mpc / 其它客户端的改动）。 */
 static int s_queue_synced = 0;
@@ -266,7 +602,8 @@ void callback_mpd(struct mg_connection *c,struct mg_ws_message *wm)
     if(mpd.conn_state != MPD_CONNECTED && cmd_id != MPD_API_SET_MPDHOST &&
         cmd_id != MPD_API_GET_MPDHOST && cmd_id != MPD_API_SET_MPDPASS &&
         cmd_id != MPD_API_GET_DIRBLEAPITOKEN &&
-        cmd_id != MPD_API_GET_AUTOSTART && cmd_id != MPD_API_SET_AUTOSTART) {
+        cmd_id != MPD_API_GET_AUTOSTART && cmd_id != MPD_API_SET_AUTOSTART &&
+        cmd_id != MPD_API_GET_AUDIO_DEVICES && cmd_id != MPD_API_SET_AUDIO_DEVICE) {
         mpd_unlock();
         return;
     }
@@ -590,6 +927,13 @@ out_set_pass:
             n = mpd_put_autostart(mpd.buf, autostart_get_enabled());
             break;
         }
+        /* 音频输出设备：与 mpd 连接无关，设置页任何时候都要能查（见文件上部说明） */
+        case MPD_API_GET_AUDIO_DEVICES:
+            n = mpd_api_get_audio_devices(mpd.buf);
+            break;
+        case MPD_API_SET_AUDIO_DEVICE:
+            n = mpd_api_set_audio_device(wm->data.buf, mpd.buf);
+            break;
     }
 
     if(mpd.conn_state == MPD_CONNECTED && mpd_connection_get_error(mpd.conn) != MPD_ERROR_SUCCESS)
@@ -647,6 +991,28 @@ static void mpd_notify_callback(struct thread_data *p) {
 void mpd_poll(struct thread_data *p)
 {
     const char * buf;
+
+    /* 音频输出切换：请求启动器重启 mpd 后，如果超过超时时间仍未连上，
+     * 回一条可见错误（不静默）。这段不碰 mpd.conn，放在取锁之前。 */
+    if (s_audio_restart_pending && time(NULL) >= s_audio_restart_deadline) {
+        s_audio_restart_pending = 0;
+        if (mpd.conn_state != MPD_CONNECTED) {
+            char detail[AUDIO_ID_MAX];
+            char msg[256];
+            size_t an;
+
+            if (audio_read_restart_result(detail, sizeof(detail)) != 0)
+                snprintf(detail, sizeof(detail), "launcher did not respond");
+            snprintf(msg, sizeof(msg), "audio output switch did not take effect: %s", detail);
+            fprintf(stderr, "AUDIO: %s\n", msg);
+            mpd_lock();
+            an = audio_err(mpd.buf, msg);
+            mpd_unlock();
+            if (p != NULL)
+                mg_wakeup(p->mgr, p->conn_id, mpd.buf, an);
+        }
+    }
+
     mpd_lock();
     switch (mpd.conn_state) {
         case MPD_DISCONNECTED:
@@ -681,6 +1047,23 @@ void mpd_poll(struct thread_data *p)
             fprintf(stderr, "MPD connected.\n");
             mpd_connection_set_timeout(mpd.conn, 10000);
             mpd.conn_state = MPD_CONNECTED;
+
+            /* 若刚才是为了切换音频输出而重启 mpd：先把队列恢复回来（mpd 重启
+             * 会丢队列），再把新的输出状态广播出去，让所有客户端校准。 */
+            audio_queue_restore();
+            if (s_audio_restart_pending) {
+                char result[AUDIO_ID_MAX];
+                size_t an;
+
+                s_audio_restart_pending = 0;
+                audio_read_restart_result(result, sizeof(result));
+                fprintf(stderr, "AUDIO: mpd restarted, new output state broadcast (result=%s)\n",
+                        result[0] ? result : "?");
+                if (p != NULL) {
+                    an = mpd_api_get_audio_devices(mpd.buf);
+                    mg_wakeup(p->mgr, p->conn_id, mpd.buf, an);
+                }
+            }
 
             /* 连接/重连成功后立刻用 mpd 的真实队列重建内部队列。否则 aurmpd
              * 重启后内部队列为空，GET /api/queue 返回空，前端看不到队列、也
