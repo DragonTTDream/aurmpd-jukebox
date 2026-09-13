@@ -191,7 +191,7 @@ class Links extends Component {
 		return (
 			<div className="links">
 				<a className="repo-link upstream" href={UPSTREAM_URL} title={UPSTREAM_LABEL}>
-					<i className="code branch icon"></i>
+					<i className="github icon"></i>
 					<span>{t('app.upstream')}</span>
 					<span className="repo-name">{UPSTREAM_LABEL}</span>
 				</a>
