@@ -1,5 +1,5 @@
 import { h, Component } from 'preact';
-import {UPSTREAM_URL, UPSTREAM_LABEL, REPO_URL, REPO_LABEL} from '../version'
+import {UPSTREAM_URL, UPSTREAM_LABEL, UPSTREAM_NAME, REPO_URL, REPO_LABEL, REPO_NAME} from '../version'
 import Events from '../events'
 import PlayerExtras from '../playerextra'
 import Player from './player'
@@ -192,12 +192,12 @@ class Links extends Component {
 			<div className="links">
 				<a className="repo-link upstream" href={UPSTREAM_URL} title={t('app.upstream') + ' · ' + UPSTREAM_LABEL}>
 					<i className="github icon"></i>
-					<span className="repo-name">{UPSTREAM_LABEL}</span>
+					<span className="repo-name">{UPSTREAM_NAME}</span>
 				</a>
 				<span className="repo-sep">→</span>
 				<a className="repo-link fork" href={REPO_URL} title={t('app.thisRepo') + ' · ' + REPO_LABEL}>
 					<i className="github icon"></i>
-					<span className="repo-name">{REPO_LABEL}</span>
+					<span className="repo-name">{REPO_NAME}</span>
 				</a>
 			</div>
 		);

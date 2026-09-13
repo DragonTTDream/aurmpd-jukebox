@@ -16,5 +16,8 @@ export const UPSTREAM_LABEL = 'breezecloud/aurmpd';
 
 export const REPO_URL = 'https://github.com/DragonTTDream/aurmpd-jukebox';
 export const REPO_LABEL = 'DragonTTDream/aurmpd-jukebox';
+// 简短项目名，用于页脚显示
+export const UPSTREAM_NAME = 'aurmpd';
+export const REPO_NAME = '点歌机';
 
 export const LICENSE_NAME = 'GPL-2.0';
