@@ -3,10 +3,12 @@ import AudioPlayer from '../audioplayer'
 import {SecondsToTime, ArrayShuffle} from '../util'
 import {CoverArt} from './common' 
 import {Messages} from './app'
+import {t} from '../i18n'
 
 
-const currentHostname = window.location.host;
-const socket = new WebSocket('ws://'+currentHostname+'/ws');
+// socket 与带队列的发送函数统一在 ../mpdws 中管理（连上之前会排队，不会抛异常）
+import {socket, sendCommand} from '../mpdws';
+export {socket};
 const fetch = require('node-fetch');
 
 export default class Player extends Component {
@@ -40,17 +42,19 @@ export default class Player extends Component {
         // 监听连接建立事件
         socket.addEventListener('open', (event) => {
 			console.log('ws:Connected to the server');
-			//socket.send('Hello, server!');
+			//sendCommand('Hello, server!');
 		});
 		// 监听接收到消息事件
 		socket.addEventListener('message', (event) => {
 			console.log(`ws:Received message from server: ${event.data}`);//for debug
+			var mpdrespond = null;
 			try {
-				var mpdrespond = JSON.parse(event.data);
+				mpdrespond = JSON.parse(event.data);
 			} catch (error) {
 				// 处理解析错误
 				console.error("JSON解析失败:", error);
 			}
+			if (mpdrespond == null) return;
 			if (mpdrespond.type == 'state'){
 				this.props.events.publish({event: "mpdstatus",data:mpdrespond.data});
 				this.setState({mpdstate:mpdrespond});
@@ -59,6 +63,9 @@ export default class Player extends Component {
 				this.props.events.publish({event: "playerEnqueued"});
 			}else if(mpdrespond.type =='song_change'){
 				//暂时没用，因为在只启动浏览器情况下不会触发song_change，当前播放队列就无法显示,而是通过tracklist记录播放歌曲id，发送songchange来实现改变歌曲
+			}else{
+				//其余消息(playlists/playlist/error等)通过事件总线广播，供本地歌单等组件消费
+				this.props.events.publish({event: "mpdMessage", data: mpdrespond});
 			}
 		});
 		// 监听连接关闭事件
@@ -79,6 +86,16 @@ export default class Player extends Component {
 		socket.removeEventListener('close', () => {});
 		socket.removeEventListener('error', () => {});
     }
+	// 入队/换队完成后给出可见反馈（成功/失败），不静默
+	enqueueResult(action, tracks) {
+		var count = tracks.length;
+		var text = null;
+		if (action === 'REPLACE') text = count > 0 ? t('player.playingCount', {count: count}) : t('player.queueCleared');
+		else if (action === 'ADD') text = t('player.addedCount', {count: count});
+		else if (action === 'ADDPLAY') text = t('player.addedPlayingCount', {count: count});
+		if (text != null) Messages.message(this.props.events, text, "success", "checkmark");
+	}
+
 	receive(event) {
 		switch (event.event) {
 
@@ -89,17 +106,17 @@ export default class Player extends Component {
 			case "playerEnqueue": this.enqueue(event.data.action, event.data.tracks); break;
 			case "playerVolume": this.volume(event.data); break;
 			case "songchange":this.setState({playing:event.data});break;
-			case "playtrack":socket.send('MPD_API_PLAY_TRACK,' + event.data.queue_sid); break;
+			case "playtrack":sendCommand('MPD_API_PLAY_TRACK,' + event.data.queue_sid); break;
 			case "browserSelected": this.setState({album: event.data.tracks}); break;
 		}
 	}
 
 	next() {
-		socket.send('MPD_API_SET_NEXT');
+		sendCommand('MPD_API_SET_NEXT');
 	}
 
 	previous() {
-		socket.send('MPD_API_SET_PREV');
+		sendCommand('MPD_API_SET_PREV');
 	}
 
 	nextTrack() {
@@ -110,9 +127,7 @@ export default class Player extends Component {
 			if (idx < this.queue.length - 1) {
 				idx++;
 			} else {
-				// it's the end of the queue, user may choose to not repeat, in which case return no next track
-				if (this.state.playing != null && localStorage.getItem('repeatQueue') === 'false') return null
-				else idx = 0;
+				idx = 0;
 			}
 
 			next = this.queue[idx];
@@ -136,14 +151,15 @@ export default class Player extends Component {
 	}
 
 	togglePlay() {
-		if (this.state.mpdstate.data.state == 2)
-			socket.send('MPD_API_SET_PAUSE');
+		// mpdstate 在首条 state 广播到达前是 null，直接取 .data 会抛异常导致按钮失灵
+		if (this.state.mpdstate && this.state.mpdstate.data && this.state.mpdstate.data.state == 2)
+			sendCommand('MPD_API_SET_PAUSE');
 		else
-			socket.send('MPD_API_SET_PLAY');
+			sendCommand('MPD_API_SET_PLAY');
 	}
 
 	stop() {
-		socket.send('MPD_API_SET_STOP');
+		sendCommand('MPD_API_SET_STOP');
 	}
 
 	volume(volume) {
@@ -153,7 +169,7 @@ export default class Player extends Component {
 			volume = 100;
 		if(volume <= 1)
 			volume = 0;
-		socket.send('MPD_API_SET_VOLUME,'+Math.floor(volume).toString()+' ')
+		sendCommand('MPD_API_SET_VOLUME,'+Math.floor(volume).toString()+' ')
 	}
 
 	enqueue(action, tracks) {
@@ -173,15 +189,16 @@ export default class Player extends Component {
 			})
 			.then(response =>{
 				if (!response.ok) {
-					throw new Error(`HTTP request failed,status: ${response.status}`);
+					throw new Error(t('errors.httpFailed', {status: response.status}));
 				}
 				return response.json();//注意：返回的是JavaScript 对象
 			})
 			.then((data) => {
-				//实际不用返回tracks
+				this.enqueueResult('REPLACE', tracks);
 			})
 			.catch(error => {
 				console.error('request error:', error.message);
+				Messages.message(this.props.events, t('player.queueUpdateFailed', {error: error.message}), "error", "warning sign");
 			});
 		}
 
@@ -200,15 +217,16 @@ export default class Player extends Component {
 			})
 			.then(response =>{
 				if (!response.ok) {
-					throw new Error(`HTTP request failed,status: ${response.status}`);
+					throw new Error(t('errors.httpFailed', {status: response.status}));
 				}
 				return response.json();//注意：返回的是JavaScript 对象
 			})
 			.then((data) => {
-				//实际不用返回tracks
+				this.enqueueResult('ADD', tracks);
 			})
 			.catch(error => {
 				console.error('request error:', error.message);
+				Messages.message(this.props.events, t('player.queueUpdateFailed', {error: error.message}), "error", "warning sign");
 			});
 		}
 
@@ -227,15 +245,16 @@ export default class Player extends Component {
 			})
 			.then(response =>{
 				if (!response.ok) {
-					throw new Error(`HTTP request failed,status: ${response.status}`);
+					throw new Error(t('errors.httpFailed', {status: response.status}));
 				}
 				return response.json();//注意：返回的是JavaScript 对象
 			})
 			.then((data) => {
-				//实际不用返回tracks
+				this.enqueueResult('ADDPLAY', tracks);
 			})
 			.catch(error => {
 				console.error('request error:', error.message);
+				Messages.message(this.props.events, t('player.queueUpdateFailed', {error: error.message}), "error", "warning sign");
 			});
 		}
 
@@ -250,7 +269,7 @@ export default class Player extends Component {
 			})
 			.then(response =>{
 				if (!response.ok) {
-					throw new Error(`HTTP request failed,status: ${response.status}`);
+					throw new Error(t('errors.httpFailed', {status: response.status}));
 				}
 				return response.json();//注意：返回的是JavaScript 对象
 			})
@@ -259,12 +278,13 @@ export default class Player extends Component {
 			})
 			.catch(error => {
 				console.error('request error:', error.message);
+				Messages.message(this.props.events, t('player.queueUpdateFailed', {error: error.message}), "error", "warning sign");
 			});
 		}
 	}
 
 	render() {
-		var nowPlaying = "Nothing playing";
+		var nowPlaying = t('player.nothingPlaying');
 		var coverArt = <img src={this.noImage} />;
 
 		if (this.state.playing != null) {
@@ -295,6 +315,9 @@ export default class Player extends Component {
 												<PlayerStopButton key="stop" events={this.props.events} />
 												<PlayerNextButton key="next" events={this.props.events} />
 												<PlayerShuffleButton key="shuffle" events={this.props.events} />
+												<PlayerModeButton key="repeat" events={this.props.events} command="MPD_API_TOGGLE_REPEAT" param="repeat" icon="repeat" title={t('player.repeatQueue')} />
+												<PlayerModeButton key="single" events={this.props.events} command="MPD_API_TOGGLE_SINGLE" param="single" icon="record" title={t('player.repeatSingle')} />
+												<PlayerModeButton key="consume" events={this.props.events} command="MPD_API_TOGGLE_CONSUME" param="consume" icon="eraser" title={t('player.consume')} />
 												<PlayerPositionDisplay key="time" events={this.props.events} playing={this.state.playing} />
 											</div>
 										</td>
@@ -319,7 +342,7 @@ class PlayerPlayingTitle extends Component {
 	render() {
 		return (
 			<span>
-				{this.props.playing == null ? "Nothing playing" : this.props.playing.title}
+				{this.props.playing == null ? t('player.nothingPlaying') : this.props.playing.title}
 			</span>
 		);
 	}
@@ -327,7 +350,7 @@ class PlayerPlayingTitle extends Component {
 
 class PlayerPlayingInfo extends Component {
 	render() {
-		var album = "Nothing playing";
+		var album = t('player.nothingPlaying');
 		if (this.props.playing != null) {
 			album = this.props.playing.artist + " - " + this.props.playing.album;
 			if (this.props.playing.date) album += " (" + this.props.playing.date + ")";
@@ -376,10 +399,25 @@ class PlayerPositionDisplay extends Component {
 	}
 }
 
+/**
+* 可交互进度条：点击跳转，按住拖动本地预览、松手提交一次 seek。
+*
+* 用法：
+*   - 目标秒数 = 比例 * totalTime；命令 MPD_API_SET_SEEK,<songid>,<pos>
+*   - songid 取服务端广播的 state.currentsongid；为 -1（没有当前歌曲）或者
+*     总时长未知时禁用交互，只显示进度并给出视觉提示。
+*   - Pointer Events + setPointerCapture 同时覆盖鼠标与触摸；拖动期间只在本地
+*     更新预览位置（不逐像素发命令），避免把 mpd 打爆。
+*/
 class PlayerProgress extends Component {
 	state = {
 		playerProgress: 0,
-		loadingProgress: 0
+		loadingProgress: 0,
+		totalTime: 0,
+		elapsed: 0,
+		songId: -1,
+		preview: null,
+		dragging: false
 	}
 
 	constructor(props, context) {
@@ -388,6 +426,11 @@ class PlayerProgress extends Component {
 			subscriber: this,
 			event: ["mpdstatus"]
 		});
+
+		this.onPointerDown = this.onPointerDown.bind(this);
+		this.onPointerMove = this.onPointerMove.bind(this);
+		this.onPointerUp = this.onPointerUp.bind(this);
+		this.onPointerCancel = this.onPointerCancel.bind(this);
 	}
 
 	componentWillUnmount() {
@@ -399,11 +442,27 @@ class PlayerProgress extends Component {
 		}
 	}
 
+	//有时候status的totalTime为0，所以优先playing的时间
+	totalTime(mpds) {
+		var fromStatus = mpds && mpds.totalTime ? mpds.totalTime : 0;
+		if (fromStatus > 0) return fromStatus;
+		return (this.props.playing && this.props.playing.duration) ? this.props.playing.duration : 0;
+	}
+
+	seekable() {
+		return this.state.songId >= 0 && this.state.totalTime > 0;
+	}
+
 	mpdstatus(mpds) {
-		//有时候status的totalTime为0，所以优先playing的时间
-		var totalTime = this.props.playing == null ? this.state.position : this.props.playing.duration;
-		var percent = totalTime == 0 ? 0:(mpds.elapsedTime / totalTime) * 100;
-		this.setState({playerProgress: percent});
+		var totalTime = this.totalTime(mpds);
+		var elapsed = mpds.elapsedTime || 0;
+		var percent = totalTime > 0 ? Math.min(100, (elapsed / totalTime) * 100) : 0;
+		var next = {totalTime: totalTime, elapsed: elapsed, playerProgress: percent};
+		// songid 变化（换歌）时不要沿用上一首的 id
+		if (mpds.currentsongid !== undefined) next.songId = mpds.currentsongid;
+		// 正在拖动时不覆盖本地预览
+		if (!this.drag) this.setState(next);
+		else this.setState({totalTime: totalTime, songId: next.songId, playerProgress: percent});
 	}
 
 	playerLoading(playing, loaded, total) {
@@ -411,11 +470,74 @@ class PlayerProgress extends Component {
 		this.setState({loadingProgress: percent});
 	}
 
+	ratioFromEvent(event) {
+		var el = this.rootRef;
+		if (!el) return 0;
+		var rect = el.getBoundingClientRect();
+		if (rect.width <= 0) return 0;
+		return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+	}
+
+	onPointerDown(event) {
+		if (!this.seekable()) return;
+		// 阻止拖拽时选中文字/触发页面滚动
+		event.preventDefault();
+		this.drag = true;
+		this.dragSongId = this.state.songId;
+		if (event.currentTarget.setPointerCapture) {
+			try { event.currentTarget.setPointerCapture(event.pointerId); } catch (e) {}
+		}
+		this.setState({dragging: true, preview: this.ratioFromEvent(event)});
+	}
+
+	onPointerMove(event) {
+		if (!this.drag) return;
+		event.preventDefault();
+		this.setState({preview: this.ratioFromEvent(event)});
+	}
+
+	onPointerUp(event) {
+		if (!this.drag) return;
+		this.drag = false;
+		var ratio = this.state.preview == null ? this.ratioFromEvent(event) : this.state.preview;
+		var total = this.state.totalTime;
+		var pos = Math.round(ratio * total);
+		if (pos < 0) pos = 0;
+		if (total > 0 && pos > total) pos = total;
+		// 拖动期间换了歌/歌曲已不在队列：这次的跳转已无意义，丢弃而不是发 -1
+		if (this.state.songId < 0 || this.dragSongId !== this.state.songId) {
+			this.setState({dragging: false, preview: null});
+			return;
+		}
+		// 只提交一次 seek
+		sendCommand('MPD_API_SET_SEEK,' + this.state.songId + ',' + pos);
+		this.setState({dragging: false, preview: null, elapsed: pos, playerProgress: ratio * 100});
+	}
+
+	onPointerCancel(event) {
+		// 系统取消（例如手势被接管）：放弃本次拖动，不发命令
+		this.drag = false;
+		this.setState({dragging: false, preview: null});
+	}
+
 	render() {
-		var playerProgress = {width: this.state.playerProgress + "%"};
+		var seekable = this.seekable();
+		var percent = (this.state.dragging && this.state.preview != null) ? this.state.preview * 100 : this.state.playerProgress;
+		var playerProgress = {width: percent + "%"};
 		var loadingProgress = {width: this.state.loadingProgress + "%"};
+		var className = "player-progress" + (seekable ? " seekable" : " disabled") + (this.state.dragging ? " dragging" : "");
 		return (
-			<div className="player-progress">
+			<div className={className}
+				ref={(r) => { this.rootRef = r; }}
+				title={seekable ? t('player.seekHint') : t('player.seekUnavailable')}
+				data-seekable={seekable ? "1" : "0"}
+				data-songid={this.state.songId}
+				data-total={this.state.totalTime}
+				data-elapsed={this.state.elapsed}
+				onPointerDown={this.onPointerDown}
+				onPointerMove={this.onPointerMove}
+				onPointerUp={this.onPointerUp}
+				onPointerCancel={this.onPointerCancel}>
 				<div className="ui red progress">
 					<i className="clock icon"></i>
 					<div className="track bar" style={playerProgress}></div>
@@ -427,31 +549,46 @@ class PlayerProgress extends Component {
 }
 
 
+/**
+* 音量条：Pointer Events（鼠标 + 触摸通用），按住后用 setPointerCapture 捕获指针，
+* 拖出元素边界也能继续调音量。
+*/
 class PlayerVolume extends Component {
 
 	constructor(props, context) {
 		super(props, context);
 
-		this.mouseDown = this.mouseDown.bind(this);
-		this.mouseUp = this.mouseUp.bind(this);
-		this.mouseMove = this.mouseMove.bind(this);
+		this.onPointerDown = this.onPointerDown.bind(this);
+		this.onPointerUp = this.onPointerUp.bind(this);
+		this.onPointerMove = this.onPointerMove.bind(this);
+		this.onPointerCancel = this.onPointerCancel.bind(this);
 	}
 
 	componentWillUnmount() {
 	}
 
-	mouseDown(event) {
+	onPointerDown(event) {
 		this.drag = true;
-		this.mouseMove(event);
+		if (event.currentTarget.setPointerCapture) {
+			try { event.currentTarget.setPointerCapture(event.pointerId); } catch (e) {}
+		}
+		this.onPointerMove(event);
 	}
 
-	mouseUp(event) {
+	onPointerUp(event) {
 		this.drag = false;
 	}
 
-	mouseMove(event) {
+	onPointerCancel(event) {
+		this.drag = false;
+	}
+
+	onPointerMove(event) {
 		if (this.drag) {
-			var rect = document.querySelector(".player-volume").getBoundingClientRect();
+			var el = this.rootRef || document.querySelector(".player-volume");
+			if (!el) return;
+			var rect = el.getBoundingClientRect();
+			if (rect.width <= 0) return;
 			var volume = Math.min(1.0, Math.max(0.0, (event.clientX - rect.left) / rect.width));
 
 			this.props.events.publish({event: "playerVolume", data: volume});
@@ -461,7 +598,10 @@ class PlayerVolume extends Component {
 	render() {
 		var playerVolume = {width: (this.props.volume*100) + "%"};
 		return (
-			<div className="player-volume" onMouseDown={this.mouseDown} onMouseMove={this.mouseMove} onMouseUp={this.mouseUp}>
+			<div className="player-volume"
+				ref={(r) => { this.rootRef = r; }}
+				onPointerDown={this.onPointerDown} onPointerMove={this.onPointerMove}
+				onPointerUp={this.onPointerUp} onPointerCancel={this.onPointerCancel}>
 				<div className="ui blue progress">
 					<i className="volume up icon"></i>
 					<div className="bar" style={playerVolume}></div>
@@ -710,15 +850,61 @@ class PlayerShuffleButton extends Component {
 
 	onClick() {
 		if(this.state.shuffle == false)
-			socket.send("MPD_API_TOGGLE_RANDOM,1");
+			sendCommand("MPD_API_TOGGLE_RANDOM,1");
 		else
-			socket.send("MPD_API_TOGGLE_RANDOM,0");
+			sendCommand("MPD_API_TOGGLE_RANDOM,0");
 	}
 
 	render() {
 		return (
 			<button className="ui icon button" onClick={this.onClick}>
 				<i className={"random icon " + (this.state.shuffle ? "red" : "")} />
+			</button>
+		);
+	}
+}
+
+/**
+* Repeat / single / consume toggle buttons.
+*
+* The active state always follows the server broadcast ("mpdstatus", taken from
+* the mpd state message), so several browsers on the same queue stay in sync.
+* The value sent is the opposite of the last known server state.
+*/
+class PlayerModeButton extends Component {
+	state = {
+		active: false
+	}
+
+	constructor(props, context) {
+		super(props, context);
+		this.onClick = this.onClick.bind(this);
+		props.events.subscribe({
+			subscriber: this,
+			event: ["mpdstatus"]
+		});
+	}
+
+	receive(event) {
+		switch (event.event) {
+			case "mpdstatus": this.mpdstatus(event.data); break;
+		}
+	}
+
+	mpdstatus(mpds) {
+		var active = (mpds[this.props.param] == 1);
+		if (active != this.state.active)
+			this.setState({active: active});
+	}
+
+	onClick() {
+		sendCommand(this.props.command + "," + (this.state.active ? 0 : 1));
+	}
+
+	render() {
+		return (
+			<button className="ui icon button" title={this.props.title} onClick={this.onClick}>
+				<i className={this.props.icon + " icon " + (this.state.active ? "red" : "")} />
 			</button>
 		);
 	}

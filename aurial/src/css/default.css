@@ -172,8 +172,30 @@
 	}
 }
 
-.trackList .controls {
-	width: 5%;
+/* controls column holds up to three icon buttons: size it to its content so it
+   never squeezes the text columns or wraps the buttons */
+.trackList th.controls,
+.trackList td.controls {
+	width: 1%;
+	white-space: nowrap;
+	vertical-align: middle;
+}
+
+.trackList th,
+.trackList td {
+	vertical-align: middle;
+}
+
+.trackList th {
+	white-space: nowrap;
+}
+
+.trackList td.controls .ui.button {
+	margin: 0 2px 0 0;
+}
+
+.trackList td.controls .ui.button:last-child {
+	margin-right: 0;
 }
 
 .trackList .number {
@@ -217,3 +239,410 @@
 	border-top-left-radius: 0;
 	border-top-right-radius: 0;
 }
+
+/*
+ * Layout polish
+ *
+ * 1. Library rows: keep checkbox, cover and text on one vertically centred line.
+ * 2. Select-all bar: reuse the same checkbox slot so it lines up with the rows.
+ * 3. Album/queue info block: no stray top offset, controlled gap above the table.
+ */
+
+.browser-frame .ui.list > .item {
+	display: flex;
+	align-items: center;
+	padding: 6px 0;
+}
+
+.browser-frame .ui.list > .item > .image {
+	flex: 0 0 auto;
+	margin-right: 10px;
+}
+
+.browser-frame .ui.list > .item > .content {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.browser-frame .library-checkbox {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	margin-right: 6px;
+}
+
+.browser-frame .library-checkbox input,
+.browser-frame .library-select-all input {
+	margin: 0;
+	cursor: pointer;
+}
+
+.browser-frame .library-controls {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.browser-frame .library-select-all {
+	display: flex;
+	align-items: center;
+	margin: 0;
+	color: rgba(255, 255, 255, 0.9);
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.selectionView .ui.items.albumInfo,
+.queueView .ui.items {
+	margin-bottom: 0.5em;
+}
+
+.selectionView .ui.items.albumInfo > .item,
+.queueView .ui.items > .item {
+	margin: 0;
+	align-items: flex-start;
+}
+
+.selectionView .ui.items.albumInfo > .item > .content > .header {
+	display: block;
+	width: 100%;
+	margin-top: 0;
+}
+
+.selectionView .trackList {
+	margin-top: 0.5em;
+}
+
+/*
+ * Interactive seek / volume bars (mouse + touch)
+ * ----------------------------------------------------------------
+ * Both bars are pointer-driven: setPointerCapture in the JS keeps the drag
+ * alive outside the element, so touch-action must stay at none and text must
+ * not be selectable while dragging.
+ */
+.player-progress,
+.player-volume {
+	touch-action: none;
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+.player-progress {
+	position: relative;
+	cursor: pointer;
+}
+
+.player-progress.disabled {
+	cursor: default;
+	opacity: 0.55;
+}
+
+.player-volume {
+	cursor: pointer;
+}
+
+/* track tables scroll inside themselves instead of stretching the page */
+.trackList-scroll {
+	max-width: 100%;
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+/* library keyword search: track level results */
+.library-tracks {
+	margin-bottom: 10px;
+}
+
+.library-tracks-title {
+	font-weight: bold;
+	padding: 2px 0 4px;
+	color: rgba(255, 255, 255, 0.9);
+}
+
+.library-track-actions {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	margin-right: 6px;
+}
+
+.library-track .content {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+}
+
+.library-track .content .description {
+	opacity: 0.75;
+}
+
+.library-no-results,
+.library-search-status {
+	padding: 6px 0;
+	color: rgba(255, 255, 255, 0.85);
+}
+
+.library-no-results {
+	font-style: italic;
+}
+
+/*
+ * Left panel top bar: sticky keyword search.
+ * The panel (.browser-frame) is the scroll container on desktop, so a sticky
+ * bar with an opaque background stays put while the album list scrolls under it.
+ */
+.library-search-bar {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	background-color: #1B1C1D;
+	padding: 0.35em 0.25em 0.5em;
+	margin-bottom: 0.25em;
+}
+
+.library-search-bar .ui.input {
+	width: 100%;
+}
+
+.library-search-bar .ui.input > input {
+	padding-right: 2.2em;
+}
+
+.library-search-clear {
+	position: absolute;
+	top: 50%;
+	right: 0.5em;
+	transform: translateY(-50%);
+	width: 1.7em;
+	height: 1.7em;
+	line-height: 1.7em;
+	padding: 0;
+	border: 0;
+	border-radius: 50%;
+	background: rgba(255, 255, 255, 0.14);
+	color: rgba(255, 255, 255, 0.9);
+	cursor: pointer;
+	font-size: 0.85em;
+}
+
+.library-search-clear:hover {
+	background: rgba(255, 255, 255, 0.26);
+}
+
+.library-search-clear .icon {
+	margin: 0;
+}
+
+/*
+ * Library album rows: inline expand/collapse of the track list (accordion).
+ * The row keeps the original checkbox / cover / content / actions layout; the
+ * track panel below it animates with max-height.
+ */
+.browser-frame .ui.list > .item.library-album {
+	flex-direction: column;
+	align-items: stretch;
+}
+
+.library-album-row {
+	display: flex;
+	align-items: center;
+	width: 100%;
+	min-width: 0;
+	cursor: pointer;
+}
+
+.library-album-row > .image {
+	flex: 0 0 auto;
+	margin-right: 10px;
+}
+
+.library-album-row > .content {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.library-album-row .header {
+	cursor: pointer;
+}
+
+.library-album-actions {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	margin-left: 4px;
+}
+
+.library-album-actions .ui.button {
+	margin: 0 0 0 4px;
+}
+
+.library-expand-toggle .icon,
+.library-open-selection .icon {
+	margin: 0;
+}
+
+.library-album-tracks {
+	max-height: 0;
+	overflow: hidden;
+	visibility: hidden;
+	transition: max-height 0.28s ease, visibility 0.28s;
+}
+
+.library-album-tracks.open {
+	max-height: 1600px;
+	visibility: visible;
+}
+
+.library-album-tracks-inner {
+	padding: 2px 0 6px 26px;
+}
+
+.library-album-tracks-status {
+	padding: 6px 0;
+	opacity: 0.8;
+}
+
+.library-album-tracks .library-album-track-list.ui.list > .item.library-track.playing {
+	background-color: rgba(33, 186, 69, 0.16);
+	box-shadow: inset 2px 0 0 0 #21ba45;
+}
+
+/*
+ * Narrow screens: the left library panel and the right content area stack
+ * vertically instead of using the absolute desktop layout.
+ */
+@media screen and (max-width: 999px) {
+	html,
+	body {
+		max-width: 100%;
+	}
+
+	.browser-frame,
+	.player-frame,
+	.playlist-frame,
+	.background-layer {
+		position: static;
+		top: auto;
+		right: auto;
+		bottom: auto;
+		left: auto;
+		width: auto;
+		height: auto;
+	}
+
+	.background-layer {
+		display: none;
+	}
+
+	.browser-frame {
+		padding: 8px;
+		border-bottom: 1px solid #2b2b2b;
+	}
+
+	/* tabs scroll horizontally instead of widening the page */
+	.playlist-menu {
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.playlist-menu .menu {
+		flex-wrap: nowrap;
+	}
+
+	.playlist-menu .menu .item {
+		flex: 0 0 auto;
+		white-space: nowrap;
+	}
+
+	.playlist-content,
+	.playlist-playlists .playlistManager .playlistSelector,
+	.playlist-playlists .playlistManager .playlistView,
+	.playlist-selection .selectionView,
+	.playlist-playing .queueView {
+		position: static;
+		height: auto;
+		max-height: none;
+	}
+
+	/* player controls wrap instead of squeezing the seek / volume bars */
+	.player-frame .player table,
+	.player-frame .player table tbody,
+	.player-frame .player table tr,
+	.player-frame .player table td {
+		display: block;
+		width: auto;
+	}
+
+	.player-frame .player table td {
+		padding: 2px 0;
+	}
+
+	.player-frame .player .ui.black.icon.buttons {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 2px;
+	}
+
+	/* comfortable touch targets (>= 40px) */
+	.player-frame .player .ui.black.icon.buttons .button {
+		min-width: 40px;
+		min-height: 40px;
+	}
+
+	.playlist-menu .menu .item {
+		min-height: 44px;
+	}
+
+	.browser-frame .ui.list > .item .ui.button,
+	.library-track-actions .ui.button {
+		min-width: 40px;
+		min-height: 40px;
+	}
+
+	.browser-frame .library-checkbox {
+		width: 40px;
+		min-height: 40px;
+	}
+
+	.browser-frame .library-select-all {
+		min-height: 40px;
+	}
+
+	.browser-frame .library-checkbox input,
+	.browser-frame .library-select-all input {
+		width: 20px;
+		height: 20px;
+	}
+
+	/* keep the wide track table scrollable rather than overflowing the page */
+	.trackList {
+		min-width: 520px;
+	}
+
+	.messages {
+		position: fixed;
+		left: 8px;
+		right: 8px;
+		bottom: 8px;
+		width: auto;
+		z-index: 10000;
+	}
+
+	img,
+	table {
+		max-width: 100%;
+	}
+}
+
+/* 在线（Subsonic）区未连接时的紧凑提示：不用大红框占版面 */
+.artistList .subsonic-hint {
+	font-size: .92em;
+	opacity: .62;
+	padding: .35em .15em .55em;
+	line-height: 1.5;
+}
+.artistList .subsonic-hint .icon { margin-right: .35em; }

@@ -3,6 +3,7 @@ import moment from 'moment'
 import {IconMessage} from './common'
 import TrackList from './tracklist'
 import {SecondsToTime} from '../util'
+import {t} from '../i18n'
 
 export default class PlayerQueue extends Component {
 	state = {
@@ -28,7 +29,7 @@ export default class PlayerQueue extends Component {
 				fetch("/api/queue")
 				.then(response =>{
 					if (!response.ok) {
-						throw new Error(`HTTP request failed,status: ${response.status}`);
+						throw new Error(t('errors.httpFailed', {status: response.status}));
 					}
 					return response.json();//注意：返回的是JavaScript 对象
 				})
@@ -55,7 +56,7 @@ export default class PlayerQueue extends Component {
 	render() {
 		if (this.state.queue == null) {
 			return (
-				<IconMessage icon="info circle" header="Nothing in the queue!" message="Add some tracks to the queue by browsing, or selecting a playlist." />
+				<IconMessage icon="info circle" header={t('queue.nothingHeader')} message={t('queue.nothingMessage')} />
 			);
 
 		} else {
@@ -70,10 +71,10 @@ export default class PlayerQueue extends Component {
 							<div className="aligned content">
 								<p className="header">
 									<i className="grey play icon"></i>
-									{this.state.queue.length} tracks, {SecondsToTime(length)}</p>
+									{t('queue.summary', {count: this.state.queue.length, duration: SecondsToTime(length)})}</p>
 								<div className="extra">
-									<button className="ui small compact labelled icon teal button" onClick={this.playlist}><i className="list icon"></i> Add to Playlist</button>
-									<button className="ui small compact labelled icon red button" onClick={this.clear}><i className="trash icon"></i> Clear Queue</button>
+									<button className="ui small compact labelled icon teal button" onClick={this.playlist}><i className="list icon"></i> {t('selection.addToPlaylist')}</button>
+									<button className="ui small compact labelled icon red button" onClick={this.clear}><i className="trash icon"></i> {t('queue.clear')}</button>
 								</div>
 							</div>
 						</div>

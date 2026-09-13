@@ -31,8 +31,186 @@
 #include "config.h"
 #include "json_encode.h"
 
+/*
+ * Coarse-grained recursive mutex around the single shared libmpdclient
+ * connection (mpd.conn). Rationale is in mpd_client.h. A recursive mutex is
+ * used because a few shutdown paths legitimately nest (mpd_clear_all ->
+ * mpd_disconnect -> mpd_poll) and because the lock is error-prone to hold by
+ * hand; it must never deadlock, since that would freeze the service.
+ */
+#ifdef _WIN32
+#include <windows.h>
+static CRITICAL_SECTION mpd_mutex;
+static int mpd_mutex_ready = 0;
+
+void mpd_lock_init(void)
+{
+    if (!mpd_mutex_ready) {
+        InitializeCriticalSection(&mpd_mutex);
+        mpd_mutex_ready = 1;
+    }
+}
+void mpd_lock(void)   { mpd_lock_init(); EnterCriticalSection(&mpd_mutex); }
+void mpd_unlock(void) { LeaveCriticalSection(&mpd_mutex); }
+#else
+#include <pthread.h>
+static pthread_mutex_t mpd_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void mpd_lock_init(void)
+{
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&mpd_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+void mpd_lock(void)   { pthread_mutex_lock(&mpd_mutex); }
+void mpd_unlock(void) { pthread_mutex_unlock(&mpd_mutex); }
+#endif
+
 char dirble_api_token[28];
 struct t_mpd mpd;
+
+/* ------------------------------------------------------------------
+ * 开机自启（autostart）
+ *
+ * Windows：以当前用户注册表 Run 项为准
+ *   HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+*   值名   : "aurmpd"
+ *   值内容 : "<aurmpd.exe 所在目录>\winaurmpd.exe"（带引号，路径可含空格）
+ *   存在即“已启用”，不存在即“未启用”。
+ * Linux：不写任何自启文件，命令仍存在但一律回 supported:false，
+ *        前端据此隐藏设置项（优雅降级）。
+ * ------------------------------------------------------------------ */
+#ifdef _WIN32
+#define AUTOSTART_SUPPORTED 1
+#define AUTOSTART_RUN_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+#define AUTOSTART_VALUE_NAME L"aurmpd"
+/* Run 项虽不受 WOW64 重定向影响，显式指定 64 位视图可避免在
+ * 32 位宿主（wine / WOW64）下读到另一视图而误判状态。 */
+#define AUTOSTART_REG_ACCESS (KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)
+
+/* 取 "<aurmpd.exe 目录>\winaurmpd.exe"；成功返回 0 */
+static int autostart_launcher_path(wchar_t *out, size_t cch)
+{
+    wchar_t path[MAX_PATH];
+    wchar_t *slash;
+    size_t dirlen, need;
+    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
+
+    if (n == 0 || n >= MAX_PATH) {
+        fprintf(stderr, "AUTOSTART: GetModuleFileNameW failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    slash = wcsrchr(path, L'\\');
+    if (slash == NULL)
+        return -1;
+    slash[1] = L'\0';              /* 保留结尾反斜杠 */
+    dirlen = wcslen(path);
+    need = dirlen + wcslen(L"winaurmpd.exe") + 1;
+    if (need > cch)
+        return -1;
+    wcscpy(out, path);
+    wcscat(out, L"winaurmpd.exe");
+    return 0;
+}
+
+/* 当前实际状态：值存在即 1，否则 0（读注册表出错也按 0 处理并打日志） */
+static int autostart_get_enabled(void)
+{
+    HKEY hkey;
+    LONG rc;
+
+    rc = RegOpenKeyExW(HKEY_CURRENT_USER, AUTOSTART_RUN_KEY, 0,
+                       AUTOSTART_REG_ACCESS, &hkey);
+    if (rc != ERROR_SUCCESS) {
+        if (rc != ERROR_FILE_NOT_FOUND)
+            fprintf(stderr, "AUTOSTART: RegOpenKeyExW failed (%ld), reporting disabled\n",
+                    (long)rc);
+        return 0;
+    }
+    rc = RegQueryValueExW(hkey, AUTOSTART_VALUE_NAME, NULL, NULL, NULL, NULL);
+    RegCloseKey(hkey);
+    if (rc == ERROR_SUCCESS)
+        return 1;
+    if (rc != ERROR_FILE_NOT_FOUND)
+        fprintf(stderr, "AUTOSTART: RegQueryValueExW failed (%ld), reporting disabled\n",
+                (long)rc);
+    return 0;
+}
+
+/* 写入/删除自启值；成功返回 0，失败返回 -1（不中断服务，仅打日志） */
+static int autostart_set_enabled(int enable)
+{
+    HKEY hkey;
+    LONG rc;
+
+    if (enable) {
+        wchar_t path[MAX_PATH + 8];
+        wchar_t quoted[MAX_PATH + 12];
+
+        if (autostart_launcher_path(path, sizeof(path) / sizeof(path[0])) != 0) {
+            fprintf(stderr, "AUTOSTART: cannot resolve winaurmpd.exe path\n");
+            return -1;
+        }
+        quoted[0] = L'"';
+        wcscpy(quoted + 1, path);
+        wcscat(quoted, L"\"");
+
+        rc = RegCreateKeyExW(HKEY_CURRENT_USER, AUTOSTART_RUN_KEY, 0, NULL, 0,
+                             AUTOSTART_REG_ACCESS, NULL, &hkey, NULL);
+        if (rc != ERROR_SUCCESS) {
+            fprintf(stderr, "AUTOSTART: RegCreateKeyExW failed (%ld)\n", (long)rc);
+            return -1;
+        }
+        rc = RegSetValueExW(hkey, AUTOSTART_VALUE_NAME, 0, REG_SZ,
+                            (const BYTE *)quoted,
+                            (DWORD)((wcslen(quoted) + 1) * sizeof(wchar_t)));
+        RegCloseKey(hkey);
+        if (rc != ERROR_SUCCESS) {
+            fprintf(stderr, "AUTOSTART: RegSetValueExW failed (%ld)\n", (long)rc);
+            return -1;
+        }
+        return 0;
+    }
+
+    rc = RegOpenKeyExW(HKEY_CURRENT_USER, AUTOSTART_RUN_KEY, 0,
+                       AUTOSTART_REG_ACCESS, &hkey);
+    if (rc != ERROR_SUCCESS) {
+        /* 键不存在 => 本来就没启用，算成功 */
+        if (rc == ERROR_FILE_NOT_FOUND)
+            return 0;
+        fprintf(stderr, "AUTOSTART: RegOpenKeyExW failed (%ld)\n", (long)rc);
+        return -1;
+    }
+    rc = RegDeleteValueW(hkey, AUTOSTART_VALUE_NAME);
+    RegCloseKey(hkey);
+    if (rc != ERROR_SUCCESS && rc != ERROR_FILE_NOT_FOUND) {
+        fprintf(stderr, "AUTOSTART: RegDeleteValueW failed (%ld)\n", (long)rc);
+        return -1;
+    }
+    return 0;
+}
+#else /* !_WIN32：Linux 优雅降级为“不支持”，不写任何自启文件 */
+#define AUTOSTART_SUPPORTED 0
+static int autostart_get_enabled(void) { return 0; }
+static int autostart_set_enabled(int enable) { (void)enable; return 0; }
+#endif
+
+/* {"type":"autostart","data":{"supported":<bool>,"enabled":<bool>}} */
+static int mpd_put_autostart(char *buffer, int enabled)
+{
+    return snprintf(buffer, MAX_SIZE,
+                    "{\"type\":\"autostart\",\"data\":{\"supported\":%s,\"enabled\":%s}}",
+                    AUTOSTART_SUPPORTED ? "true" : "false",
+                    enabled ? "true" : "false");
+}
+
+/* 内部队列与 mpd 的同步状态：首次连接后（s_queue_synced==0）强制同步一次，
+ * 之后只在 mpd queue_version 变化时同步（外部 mpc / 其它客户端的改动）。 */
+static int s_queue_synced = 0;
+static unsigned s_queue_version_synced = 0;
 /* forward declaration */
 static void mpd_notify_callback(struct thread_data *p);
 
@@ -81,10 +259,17 @@ void callback_mpd(struct mg_connection *c,struct mg_ws_message *wm)
     if(cmd_id == -1)
         return;
 
+    /* Serialise against the 1 Hz poll thread (and HTTP handlers) which use the
+     * same mpd.conn: libmpdclient connections are not thread safe. */
+    mpd_lock();
+
     if(mpd.conn_state != MPD_CONNECTED && cmd_id != MPD_API_SET_MPDHOST &&
         cmd_id != MPD_API_GET_MPDHOST && cmd_id != MPD_API_SET_MPDPASS &&
-        cmd_id != MPD_API_GET_DIRBLEAPITOKEN)
+        cmd_id != MPD_API_GET_DIRBLEAPITOKEN &&
+        cmd_id != MPD_API_GET_AUTOSTART && cmd_id != MPD_API_SET_AUTOSTART) {
+        mpd_unlock();
         return;
+    }
 
     switch(cmd_id)
     {
@@ -219,6 +404,7 @@ out_add_track:
 out_play_track:
             free(p_charbuf);
             break;
+        /* Load a stored playlist into the queue (mpd: replace queue) */
         case MPD_API_ADD_PLAYLIST:
             p_charbuf = strdup(wm->data.buf);
             if(strcmp(strtok(p_charbuf, ","), "MPD_API_ADD_PLAYLIST"))
@@ -232,7 +418,9 @@ out_play_track:
             mpd_run_load(mpd.conn, get_arg1(p_charbuf));
 out_playlist:
             free(p_charbuf);
+            p_charbuf = NULL;
             break;
+        /* Save the current queue as a stored playlist; answer with the fresh list */
         case MPD_API_SAVE_QUEUE:
             p_charbuf = strdup(wm->data.buf);
             if(strcmp(strtok(p_charbuf, ","), "MPD_API_SAVE_QUEUE"))
@@ -243,9 +431,58 @@ out_playlist:
 
 			free(p_charbuf);
             p_charbuf = strdup(wm->data.buf);
-            mpd_run_save(mpd.conn, get_arg1(p_charbuf));
+            if(mpd_run_save(mpd.conn, get_arg1(p_charbuf)))
+                n = mpd_put_playlists(mpd.buf);
+            else {
+                n = snprintf(mpd.buf, MAX_SIZE, "{\"type\":\"error\", \"data\": \"%s\"}",
+                    mpd_connection_get_error_message(mpd.conn));
+                mpd_connection_clear_error(mpd.conn);
+            }
 out_save_queue:
             free(p_charbuf);
+            p_charbuf = NULL;
+            break;
+        /* List stored playlists (mpd playlist directory) */
+        case MPD_API_GET_PLAYLISTS:
+            n = mpd_put_playlists(mpd.buf);
+            break;
+        /* Read the songs of one stored playlist */
+        case MPD_API_GET_PLAYLIST_SONGS:
+            p_charbuf = strdup(wm->data.buf);
+            if(strcmp(strtok(p_charbuf, ","), "MPD_API_GET_PLAYLIST_SONGS"))
+                goto out_playlist_songs;
+
+            if((token = strtok(NULL, ",")) == NULL)
+                goto out_playlist_songs;
+
+			free(p_charbuf);
+            p_charbuf = strdup(get_arg1(wm->data.buf));
+            n = mpd_put_playlist_songs(mpd.buf, p_charbuf);
+out_playlist_songs:
+            free(p_charbuf);
+            p_charbuf = NULL;
+            break;
+        /* Delete a stored playlist, then answer with the fresh list */
+        case MPD_API_RM_PLAYLIST:
+            p_charbuf = strdup(wm->data.buf);
+            if(strcmp(strtok(p_charbuf, ","), "MPD_API_RM_PLAYLIST"))
+                goto out_rm_playlist;
+
+            if((token = strtok(NULL, ",")) == NULL)
+                goto out_rm_playlist;
+
+			free(p_charbuf);
+            p_charbuf = strdup(wm->data.buf);
+            if(mpd_run_rm(mpd.conn, get_arg1(p_charbuf)))
+                n = mpd_put_playlists(mpd.buf);
+            else {
+                n = snprintf(mpd.buf, MAX_SIZE, "{\"type\":\"error\", \"data\": \"%s\"}",
+                    mpd_connection_get_error_message(mpd.conn));
+                mpd_connection_clear_error(mpd.conn);
+            }
+out_rm_playlist:
+            free(p_charbuf);
+            p_charbuf = NULL;
             break;
         case MPD_API_SEARCH:
             p_charbuf = strdup(wm->data.buf);
@@ -330,6 +567,29 @@ out_set_pass:
             free(p_charbuf);
             break;
 #endif
+        /* 开机自启：不依赖 mpd 连接，任何时候都要能读写（前端设置项） */
+        case MPD_API_GET_AUTOSTART:
+            n = mpd_put_autostart(mpd.buf, autostart_get_enabled());
+            break;
+        case MPD_API_SET_AUTOSTART:
+        {
+            /* 形如 "MPD_API_SET_AUTOSTART,1" / "MPD_API_SET_AUTOSTART,0" */
+            static const char prefix[] = "MPD_API_SET_AUTOSTART,";
+            int enable = 0;
+
+            if (strncmp(wm->data.buf, prefix, sizeof(prefix) - 1) != 0 ||
+                wm->data.buf[sizeof(prefix) - 1] == '\0') {
+                fprintf(stderr, "AUTOSTART: malformed command, ignoring\n");
+            } else {
+                enable = (wm->data.buf[sizeof(prefix) - 1] == '1');
+                if (autostart_set_enabled(enable) != 0)
+                    fprintf(stderr, "AUTOSTART: failed to %s autostart\n",
+                            enable ? "enable" : "disable");
+            }
+            /* 无论成功与否，都回复写入后的实际状态，让 UI 能立即确认结果 */
+            n = mpd_put_autostart(mpd.buf, autostart_get_enabled());
+            break;
+        }
     }
 
     if(mpd.conn_state == MPD_CONNECTED && mpd_connection_get_error(mpd.conn) != MPD_ERROR_SUCCESS)
@@ -341,6 +601,8 @@ out_set_pass:
         if (!mpd_connection_clear_error(mpd.conn))
             mpd.conn_state = MPD_FAILURE;
     }
+
+    mpd_unlock();
 
     if(n > 0){
         //mg_ws_send(c, mpd.buf, n, WEBSOCKET_OP_TEXT);
@@ -385,6 +647,7 @@ static void mpd_notify_callback(struct thread_data *p) {
 void mpd_poll(struct thread_data *p)
 {
     const char * buf;
+    mpd_lock();
     switch (mpd.conn_state) {
         case MPD_DISCONNECTED:
             /* Try to connect */
@@ -393,7 +656,9 @@ void mpd_poll(struct thread_data *p)
             if (mpd.conn == NULL) {
                 fprintf(stderr, "Out of memory.");
                 mpd.conn_state = MPD_FAILURE;
-                return;
+                /* 不能直接 return：这里持有 mpd_lock，直接返回会让锁永远不释放，
+                   后续 mpd_clear_all 会永久阻塞，进程退不掉（残留进程占着目录）。 */
+                goto out;
             }
 
             if (mpd_connection_get_error(mpd.conn) != MPD_ERROR_SUCCESS) {
@@ -401,7 +666,7 @@ void mpd_poll(struct thread_data *p)
                 buf = mpd_connection_get_error_message(mpd.conn);
                 mg_ws_send_error(p,buf);
                 mpd.conn_state = MPD_FAILURE;
-                return;
+                goto out;
             }
 
             if(mpd.password && !mpd_run_password(mpd.conn, mpd.password))
@@ -410,12 +675,39 @@ void mpd_poll(struct thread_data *p)
                 buf = mpd_connection_get_error_message(mpd.conn);
                 mg_ws_send_error(p,buf);
                 mpd.conn_state = MPD_FAILURE;
-                return;
+                goto out;
             }
 
             fprintf(stderr, "MPD connected.\n");
             mpd_connection_set_timeout(mpd.conn, 10000);
             mpd.conn_state = MPD_CONNECTED;
+
+            /* 连接/重连成功后立刻用 mpd 的真实队列重建内部队列。否则 aurmpd
+             * 重启后内部队列为空，GET /api/queue 返回空，前端看不到队列、也
+             * 无法控制正在播放的曲目（用户反馈的「完全脱离掌控」）。 */
+            queue_sync_from_mpd();
+            s_queue_synced = 1;
+
+            /* 曲库为空时自动触发一次全量扫描。mpd 只在 db_file 不存在时才会
+             * 自动扫描；用户换掉 mpd.conf / music_directory 后旧 db_file 仍在，
+             * 不显式 update 就永远读到旧（甚至空）曲库。这里只在「库为空」时
+             * 扫，避免每次启动都为超大曲库做一次很慢的全量扫描。 */
+            {
+                struct mpd_stats *stats = mpd_run_stats(mpd.conn);
+                if (stats == NULL) {
+                    fprintf(stderr, "MPD stats: %s\n", mpd_connection_get_error_message(mpd.conn));
+                    mpd_connection_clear_error(mpd.conn);
+                } else {
+                    unsigned num_songs = mpd_stats_get_number_of_songs(stats);
+                    mpd_stats_free(stats);
+                    if (num_songs == 0) {
+                        fprintf(stderr, "MPD library is empty (0 songs), triggering full database update.\n");
+                        if (!mpd_run_update(mpd.conn, NULL))
+                            fprintf(stderr, "MPD update: %s\n", mpd_connection_get_error_message(mpd.conn));
+                    }
+                }
+            }
+
             /* write outputs */
             mpd.buf_size = mpd_put_outputs(mpd.buf, 1);
             mpd_notify_callback(p);
@@ -434,11 +726,22 @@ void mpd_poll(struct thread_data *p)
 
         case MPD_CONNECTED:
             mpd.buf_size = mpd_put_state(mpd.buf, &mpd.song_id, &mpd.queue_version);
+            /* 队列版本变化（包括外部用 mpc / 其它客户端改动 mpd 队列）时，
+             * 把 mpd 当前队列同步回内部队列，再广播 update_queue。 */
+            if (mpd.conn_state == MPD_CONNECTED &&
+                (!s_queue_synced || mpd.queue_version != s_queue_version_synced)) {
+                queue_sync_from_mpd();
+                s_queue_version_synced = mpd.queue_version;
+                s_queue_synced = 1;
+            }
             mpd_notify_callback(p);
             mpd.buf_size = mpd_put_outputs(mpd.buf, 0);
             mpd_notify_callback(p);
             break;
     }
+    /* 唯一的解锁出口：所有失败路径都 goto 到这里，避免持锁返回造成死锁 */
+out:
+    mpd_unlock();
 }
 
 char* mpd_get_title(struct mpd_song const *song)
@@ -695,6 +998,89 @@ int mpd_put_browse(char *buffer, char *path, unsigned int offset)
     return cur - buffer;
 }
 
+/* List the playlists stored in mpd's playlist directory.
+ * Output: {"type":"playlists","data":[{"name":"x","lastmodified":<epoch seconds>},...]} */
+int mpd_put_playlists(char *buffer)
+{
+    char *cur = buffer;
+    const char *end = buffer + MAX_SIZE;
+    struct mpd_playlist *pl;
+    time_t last_modified;
+
+    if (!mpd_send_list_playlists(mpd.conn))
+        RETURN_ERROR_AND_RECOVER("mpd_send_list_playlists");
+
+    cur += json_emit_raw_str(cur, end - cur, "{\"type\":\"playlists\",\"data\":[ ");
+
+    while ((pl = mpd_recv_playlist(mpd.conn)) != NULL) {
+        last_modified = mpd_playlist_get_last_modified(pl);
+
+        cur += json_emit_raw_str(cur, end - cur, "{\"name\":");
+        cur += json_emit_quoted_str(cur, end - cur, mpd_playlist_get_path(pl));
+        cur += json_emit_raw_str(cur, end - cur, ",\"lastmodified\":");
+        cur += json_emit_int(cur, end - cur, (long int)last_modified);
+        cur += json_emit_raw_str(cur, end - cur, "},");
+        mpd_playlist_free(pl);
+    }
+
+    if (mpd_connection_get_error(mpd.conn) != MPD_ERROR_SUCCESS || !mpd_response_finish(mpd.conn)) {
+        fprintf(stderr, "MPD mpd_send_list_playlists: %s\n", mpd_connection_get_error_message(mpd.conn));
+        mpd.conn_state = MPD_FAILURE;
+        return 0;
+    }
+
+    /* remove last ',' (or the separating space when the list is empty) */
+    cur--;
+
+    cur += json_emit_raw_str(cur, end - cur, "]}");
+    return cur - buffer;
+}
+
+/* Read the songs of one stored playlist.
+ * Output: {"type":"playlist","data":{"name":"x","song":[{uri,pos,duration,title,artist,album},...]}} */
+int mpd_put_playlist_songs(char *buffer, const char *name)
+{
+    char *cur = buffer;
+    const char *end = buffer + MAX_SIZE;
+    struct mpd_song *song;
+
+    if (!mpd_send_list_playlist_meta(mpd.conn, name))
+        RETURN_ERROR_AND_RECOVER("mpd_send_list_playlist_meta");
+
+    cur += json_emit_raw_str(cur, end - cur, "{\"type\":\"playlist\",\"data\":{\"name\":");
+    cur += json_emit_quoted_str(cur, end - cur, name);
+    cur += json_emit_raw_str(cur, end - cur, ",\"song\":[ ");
+
+    while ((song = mpd_recv_song(mpd.conn)) != NULL) {
+        cur += json_emit_raw_str(cur, end - cur, "{\"uri\":");
+        cur += json_emit_quoted_str(cur, end - cur, mpd_song_get_uri(song));
+        cur += json_emit_raw_str(cur, end - cur, ",\"pos\":");
+        cur += json_emit_int(cur, end - cur, mpd_song_get_pos(song));
+        cur += json_emit_raw_str(cur, end - cur, ",\"duration\":");
+        cur += json_emit_int(cur, end - cur, mpd_song_get_duration(song));
+        cur += json_emit_raw_str(cur, end - cur, ",\"title\":");
+        cur += json_emit_quoted_str(cur, end - cur, mpd_get_title(song));
+        cur += json_emit_raw_str(cur, end - cur, ",\"artist\":");
+        cur += json_emit_quoted_str(cur, end - cur, mpd_get_artist(song));
+        cur += json_emit_raw_str(cur, end - cur, ",\"album\":");
+        cur += json_emit_quoted_str(cur, end - cur, mpd_get_album(song));
+        cur += json_emit_raw_str(cur, end - cur, "},");
+        mpd_song_free(song);
+    }
+
+    if (mpd_connection_get_error(mpd.conn) != MPD_ERROR_SUCCESS || !mpd_response_finish(mpd.conn)) {
+        fprintf(stderr, "MPD mpd_send_list_playlist_meta: %s\n", mpd_connection_get_error_message(mpd.conn));
+        mpd.conn_state = MPD_FAILURE;
+        return 0;
+    }
+
+    /* remove last ',' (or the separating space when the playlist is empty) */
+    cur--;
+
+    cur += json_emit_raw_str(cur, end - cur, "]}}");
+    return cur - buffer;
+}
+
 int mpd_search(char *buffer, char *searchstr)
 {
     int i = 0;
@@ -750,6 +1136,7 @@ void mpd_disconnect()
 
 void mpd_clear_all()
 {
+    mpd_lock();
     if (mpd.conn != NULL) {
         // 标记响应接收结束
         //mpd_response_finish(mpd.conn);
@@ -772,5 +1159,5 @@ void mpd_clear_all()
         mpd_disconnect();
     }else
         fprintf(stderr, "mpd.conn is NULL\n");
-
+    mpd_unlock();
 }

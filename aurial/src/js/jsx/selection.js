@@ -2,6 +2,7 @@ import { h, Component } from 'preact';
 import moment from 'moment'
 import {IconMessage,CoverArt} from './common'
 import TrackList from './tracklist'
+import {t} from '../i18n'
 import {SecondsToTime} from '../util'
 
 export default class Selection extends Component {
@@ -27,7 +28,7 @@ export default class Selection extends Component {
 	render() {
 		if (this.state.album == null) {
 			return (
-				<IconMessage icon="info circle" header="Nothing Selected!" message="Select an album from the browser." />
+				<IconMessage icon="info circle" header={t('selection.nothingHeader')} message={t('selection.nothingMessage')} />
 			);
 
 		} else {
@@ -66,7 +67,7 @@ class SelectionAlbum extends Component {
 
 	render() {
 		return (
-			<div className="ui items">
+			<div className="ui items albumInfo">
 				<div className="item">
 					<div className="ui small image">
 						<CoverArt subsonic={this.props.subsonic} id={this.props.album.coverArt} events={this.props.events} size={200} />
@@ -78,14 +79,14 @@ class SelectionAlbum extends Component {
 						</div>
 						<div className="meta">
 							<div>{this.props.album.genre != '(255)' ? this.props.album.genre : ""}</div>
-							<div>{this.props.album.year ? "Year: " + this.props.album.year : ""}</div>
-							<div>Added: {moment(this.props.album.created).format("ll")}</div>
-							<div>{this.props.album.songCount} tracks, {SecondsToTime(this.props.album.duration)}</div>
+							<div>{this.props.album.year ? t('selection.year', {year: this.props.album.year}) : ""}</div>
+							<div>{t('selection.added', {date: moment(this.props.album.created).format("ll")})}</div>
+							<div>{t('selection.tracks', {count: this.props.album.songCount, duration: SecondsToTime(this.props.album.duration)})}</div>
 						</div>
 						<div className="extra">
-							<button className="ui small compact labelled icon green button" onClick={this.play}><i className="play icon"></i> Play</button>
-							<button className="ui small compact labelled icon olive button" onClick={this.enqueue}><i className="plus icon"></i> Add to Queue</button>
-							<button className="ui small compact labelled icon teal button" onClick={this.playlist}><i className="list icon"></i> Add to Playlist</button>
+							<button className="ui small compact labelled icon green button" onClick={this.play}><i className="play icon"></i> {t('selection.play')}</button>
+							<button className="ui small compact labelled icon olive button" onClick={this.enqueue}><i className="plus icon"></i> {t('selection.addToQueue')}</button>
+							<button className="ui small compact labelled icon teal button" onClick={this.playlist}><i className="list icon"></i> {t('selection.addToPlaylist')}</button>
 						</div>
 					</div>
 				</div>

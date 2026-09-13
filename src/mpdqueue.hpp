@@ -26,6 +26,9 @@ public:
     void playSid(int queue_sid);
     // 删除指定 queue_sid 的歌曲
     bool removeSongBySid(const int queue_sid);
+    // 用 mpd 当前队列重建内部队列（启动/重连/外部改动后调用），
+    // queue_sid 直接采用 mpd song id，保证与 mpd 一致。
+    void syncFromMpd();
 };
 
 #endif

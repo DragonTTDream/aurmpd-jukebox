@@ -1,5 +1,6 @@
 import {h, Component} from 'preact';
 import {UniqueID} from '../util'
+import {t} from '../i18n'
 
 export class CoverArt extends Component {
 	static defaultProps = {
@@ -108,10 +109,10 @@ export class Prompt extends Component {
 	_id = UniqueID();
 
 	static defaultProps = {
-		title: "Question",
-		message: "Are you sure?",
-		ok: "OK",
-		cancel: "Cancel",
+		title: null,
+		message: null,
+		ok: null,
+		cancel: null,
 		icon: "grey help circle"
 	}
 
@@ -139,22 +140,27 @@ export class Prompt extends Component {
 	}
 
 	render() {
+		var title = this.props.title || t('common.question');
+		var message = this.props.message || t('common.areYouSure');
+		var ok = this.props.ok || t('common.ok');
+		var cancel = this.props.cancel || t('common.cancel');
+
 		return (
 			<div id={this._id} className="ui small modal">
 				<div className="header">
-					{this.props.title}
+					{title}
 				</div>
 				<div className="image content">
 					<div className="image">
 						<i className={this.props.icon + " icon"}></i>
 					</div>
 					<div className="description">
-						{this.props.message}
+						{message}
 					</div>
 				</div>
 				<div className="actions">
-					<div className="ui cancel button">{this.props.cancel}</div>
-					<div className="ui blue ok button">{this.props.ok}</div>
+					<div className="ui cancel button">{cancel}</div>
+					<div className="ui blue ok button">{ok}</div>
 				</div>
 			</div>
 		);
@@ -165,10 +171,10 @@ export class InputPrompt extends Component {
 	_id = UniqueID();
 
 	static defaultProps = {
-		title: "Prompt",
-		message: "Please provide a value",
-		ok: "OK",
-		cancel: "Cancel",
+		title: null,
+		message: null,
+		ok: null,
+		cancel: null,
 		icon: "grey edit"
 	}
 
@@ -206,10 +212,15 @@ export class InputPrompt extends Component {
 	}
 
 	render() {
+		var title = this.props.title || t('common.prompt');
+		var message = this.props.message || t('common.provideValue');
+		var ok = this.props.ok || t('common.ok');
+		var cancel = this.props.cancel || t('common.cancel');
+
 		return (
 			<div id={this._id} className="ui small modal">
 				<div className="header">
-					{this.props.title}
+					{title}
 				</div>
 				<div className="image content">
 					<div className="image">
@@ -218,15 +229,15 @@ export class InputPrompt extends Component {
 					<div className="description">
 						<form className="ui form" onSubmit={function(e) {e.preventDefault();}}>
 							<div className="field">
-								<label>{this.props.message}</label>
+								<label>{message}</label>
 								<input name="value" type="text" onChange={this.change} value={this.state.value} />
 							</div>
 						</form>
 					</div>
 				</div>
 				<div className="actions">
-					<div className="ui cancel button">{this.props.cancel}</div>
-					<div className="ui blue ok button">{this.props.ok}</div>
+					<div className="ui cancel button">{cancel}</div>
+					<div className="ui blue ok button">{ok}</div>
 				</div>
 			</div>
 		);
@@ -237,11 +248,11 @@ export class ListPrompt extends Component {
 	_id = UniqueID();
 
 	static defaultProps = {
-		title: "Prompt",
-		message: "Please select an option",
-		defaultText: "Select an option...",
-		ok: "OK",
-		cancel: "Cancel",
+		title: null,
+		message: null,
+		defaultText: null,
+		ok: null,
+		cancel: null,
 		icon: "grey list",
 		items: [],
 		value: null,
@@ -289,21 +300,27 @@ export class ListPrompt extends Component {
 	}
 
 	render() {
+		var title = this.props.title || t('common.prompt');
+		var message = this.props.message || t('common.selectOption');
+		var defaultText = this.props.defaultText || t('common.selectOption');
+		var ok = this.props.ok || t('common.ok');
+		var cancel = this.props.cancel || t('common.cancel');
+
 		return (
 			<div id={this._id} className="ui small modal">
 				<div className="header">
-					{this.props.title}
+					{title}
 				</div>
 				<div className="image content">
 					<div className="image">
 						<i className={this.props.icon + " icon"}></i>
 					</div>
 					<div className="description">
-						<div>{this.props.message}</div>
+						<div>{message}</div>
 						<div className="ui basic segment">
 							<div className="ui fluid search selection dropdown">
 								<i className="dropdown icon"></i>
-								<div className="default text">{this.props.defaultText}</div>
+								<div className="default text">{defaultText}</div>
 								<div className="menu">
 									{this.props.items}
 								</div>
@@ -312,8 +329,8 @@ export class ListPrompt extends Component {
 					</div>
 				</div>
 				<div className="actions">
-					<div className="ui cancel button">{this.props.cancel}</div>
-					<div className="ui blue ok button">{this.props.ok}</div>
+					<div className="ui cancel button">{cancel}</div>
+					<div className="ui blue ok button">{ok}</div>
 				</div>
 			</div>
 		);
@@ -324,8 +341,8 @@ export class ImageViewer extends Component {
 	_id = UniqueID();
 
 	static defaultProps = {
-		title: "View",
-		ok: "OK"
+		title: null,
+		ok: null
 	}
 
 	constructor(props, context) {
@@ -366,13 +383,13 @@ export class ImageViewer extends Component {
 		return (
 			<div id={this._id} className="ui basic modal">
 				<div className="header">
-					{this.props.title}
+					{this.props.title || t('imageViewer.title')}
 				</div>
 				<div className="content" style={center}>
 					<img src={this.state.image} style={center}/>
 				</div>
 				<div className="actions">
-					<div className="ui basic inverted ok button">{this.props.ok}</div>
+					<div className="ui basic inverted ok button">{this.props.ok || t('common.ok')}</div>
 				</div>
 			</div>
 		);

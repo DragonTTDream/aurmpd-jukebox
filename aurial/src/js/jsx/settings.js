@@ -3,6 +3,10 @@ import Subsonic from '../subsonic'
 import {UniqueID} from '../util'
 import {Messages} from './app'
 import {Prompt} from './common'
+import {t, getLanguage, setLanguage, languages} from '../i18n'
+// 未识别类型的 WS 消息由 player.js 广播为 "mpdMessage" 事件（见文件头注释），
+// 自动启停开关通过它接收 {"type":"autostart", ...} 回包
+import {sendCommand} from '../mpdws'
 
 const TEST_UNTESTED = 0;
 const TEST_BUSY = 1;
@@ -17,10 +21,13 @@ export default class Settings extends Component {
 		password: '',
 		notifications: localStorage.getItem('notifications') === 'true',
 		backgroundArt: localStorage.getItem('backgroundArt') === 'true',
-		persistQueue: localStorage.getItem('persistQueue') === 'true',
-		repeatQueue: localStorage.getItem('repeatQueue') === 'true',
 		trackBuffer: localStorage.getItem('trackBuffer') || '0',
-		testState: TEST_UNTESTED
+		testState: TEST_UNTESTED,
+		lang: getLanguage(),
+		// 开机自启由服务端说了算：supported=null 表示还没问到（先不渲染）
+		autostartSupported: null,
+		autostartEnabled: false,
+		autostartPending: false
 	};
 
 	constructor(props, context) {
@@ -30,6 +37,81 @@ export default class Settings extends Component {
 		this.change = this.change.bind(this);
 		this.demo = this.demo.bind(this);
 		this.test = this.test.bind(this);
+		this.changeLanguage = this.changeLanguage.bind(this);
+		this.receive = this.receive.bind(this);
+		this.toggleAutostart = this.toggleAutostart.bind(this);
+		this.queryAutostart = this.queryAutostart.bind(this);
+
+		props.events.subscribe({
+			subscriber: this,
+			event: ["mpdMessage"]
+		});
+	}
+
+	componentDidMount() {
+		// 设置页在应用启动时就已挂载（标签页只是被 CSS 隐藏），所以这里先查一次，
+		// 再在每次点开设置标签时重查，保证看到的是服务端当前值
+		this.queryAutostart();
+		this.autostartTab = document.querySelector('a.item[data-tab="settings"]');
+		if (this.autostartTab) {
+			this.autostartTabHandler = () => this.queryAutostart();
+			this.autostartTab.addEventListener('click', this.autostartTabHandler);
+		}
+	}
+
+	componentWillUnmount() {
+		this.clearAutostartTimer();
+		if (this.autostartTab && this.autostartTabHandler) {
+			this.autostartTab.removeEventListener('click', this.autostartTabHandler);
+		}
+	}
+
+	clearAutostartTimer() {
+		if (this.autostartTimer) {
+			clearTimeout(this.autostartTimer);
+			this.autostartTimer = null;
+		}
+	}
+
+	queryAutostart() {
+		sendCommand('MPD_API_GET_AUTOSTART');
+	}
+
+	receive(event) {
+		if (event.event == "mpdMessage") this.mpdMessage(event.data);
+	}
+
+	// 服务端回包：{"type":"autostart","data":{"supported":bool,"enabled":bool}}
+	mpdMessage(msg) {
+		if (!msg || msg.type != 'autostart' || !msg.data) return;
+		this.clearAutostartTimer();
+		// 以服务端回包校正 UI（SET 之后也走这里）
+		this.setState({
+			autostartSupported: !!msg.data.supported,
+			autostartEnabled: !!msg.data.enabled,
+			autostartPending: false
+		});
+	}
+
+	toggleAutostart(e) {
+		var next = e.target.checked;
+		// 先按点击结果显示，等服务端回包再校正
+		this.setState({autostartEnabled: next, autostartPending: true});
+		sendCommand('MPD_API_SET_AUTOSTART,' + (next ? 1 : 0));
+
+		// 没有回包/失败时不静默：给可见提示并回到原值
+		this.clearAutostartTimer();
+		this.autostartTimer = setTimeout(function() {
+			this.autostartTimer = null;
+			this.setState({autostartEnabled: !next, autostartPending: false});
+			Messages.message(this.props.events, t('settings.autostartFailed'), "error", "warning sign");
+		}.bind(this), 5000);
+	}
+
+	// Language switches instantly (no Save needed) and is persisted by i18n.
+	changeLanguage(e) {
+		var lang = setLanguage(e.target.value);
+		this.setState({lang: lang});
 	}
 
 	save(e) {
@@ -46,11 +128,9 @@ export default class Settings extends Component {
 
 		localStorage.setItem('notifications', this.state.notifications);
 		localStorage.setItem('backgroundArt', this.state.backgroundArt);
-		localStorage.setItem('persistQueue', this.state.persistQueue);
-		localStorage.setItem('repeatQueue', this.state.repeatQueue);
 		localStorage.setItem('trackBuffer', this.state.trackBuffer);
 
-		Messages.message(this.props.events, "Settings saved.", "success", "Save");
+		Messages.message(this.props.events, t('settings.saved'), "success", "Save");
 
 		// reload app with new settings
 		var subsonic = new Subsonic(
@@ -105,7 +185,7 @@ export default class Settings extends Component {
 			success: function(data) {
 				if (data.status === "ok") {
 					this.setState({testState: TEST_SUCCESS});
-					Messages.message(this.props.events, "Connection test successful!", "success", "plug");
+					Messages.message(this.props.events, t('settings.testSuccess'), "success", "plug");
 				} else {
 					console.log(data.error);
 					this.setState({testState: TEST_FAILED});
@@ -114,7 +194,7 @@ export default class Settings extends Component {
 			}.bind(this),
 			error: function(err) {
 				this.setState({testState: TEST_FAILED});
-				Messages.message(this.props.events, "Failed to connect to server: " + err.message, "error", "plug");
+				Messages.message(this.props.events, t('settings.testFailed', {error: err.message}), "error", "plug");
 			}.bind(this)
 		});
 	}
@@ -126,8 +206,6 @@ export default class Settings extends Component {
 			case "password": this.setState({password: e.target.value}); break;
 			case "notifications": this.setState({notifications: e.target.checked}); break;
 			case "backgroundArt": this.setState({backgroundArt: e.target.checked}); break;
-			case "persistQueue": this.setState({persistQueue: e.target.checked}); break;
-			case "repeatQueue": this.setState({repeatQueue: e.target.checked}); break;
 			case "trackBuffer": this.setState({trackBuffer: e.target.value}); break;
 		}
 
@@ -147,72 +225,80 @@ export default class Settings extends Component {
 			<div className="ui basic segment">
 				<form className="ui form" onSubmit={this.save}>
 					<h3 className="ui dividing header">
-						Subsonic Connection
+						{t('settings.language')}
 					</h3>
 					<div className="field">
-						<label>Subsonic URL</label>
+						<select name="lang" onChange={this.changeLanguage} value={this.state.lang}>
+							{languages.map(function(language) {
+								return <option key={language.code} value={language.code}>{language.label}</option>;
+							})}
+						</select>
+					</div>
+
+					<h3 className="ui dividing header">
+						{t('settings.connection')}
+					</h3>
+					<div className="field">
+						<label>{t('settings.url')}</label>
 						<input name="url" placeholder="http://yourname.subsonic.com" type="text" onChange={this.change} value={this.state.url} />
 					</div>
 					<div className="two fields">
 						<div className="field">
-							<label>Username</label>
+							<label>{t('settings.username')}</label>
 							<input name="user" placeholder="username" type="text" onChange={this.change} value={this.state.user} />
 						</div>
 						<div className="field">
-							<label>Password (<i>leave blank to keep unchanged</i>)</label>
+							<label>{t('settings.password')} (<i>{t('settings.passwordHint')}</i>)</label>
 							<input name="password" placeholder="password" type="password" onChange={this.change} value={this.state.password} />
 						</div>
 					</div>
 
 					<h3 className="ui dividing header">
-						Preferences
+						{t('settings.preferences')}
 					</h3>
 					<div className="field">
-						<label>Buffer next track (begin buffering this long before end of the current track)</label>
+						<label>{t('settings.bufferLabel')}</label>
 						<select name="trackBuffer" onChange={this.change} value={this.state.trackBuffer}>
-							<option value="0">Disabled</option>
-							<option value="10">10 seconds</option>
-							<option value="30">30 seconds</option>
+							<option value="0">{t('settings.bufferDisabled')}</option>
+							<option value="10">{t('settings.buffer10')}</option>
+							<option value="30">{t('settings.buffer30')}</option>
 						</select>
 					</div>
 					<div className="field">
 						<div className="ui checkbox">
 							<input name="notifications" type="checkbox" onChange={this.change} checked={this.state.notifications}/>
-							<label>Enable desktop notifications</label>
+							<label>{t('settings.notifications')}</label>
 						</div>
 					</div>
 					<div className="field">
 						<div className="ui checkbox">
 							<input name="backgroundArt" type="checkbox" onChange={this.change} checked={this.state.backgroundArt}/>
-							<label>Enable background art</label>
+							<label>{t('settings.backgroundArt')}</label>
 						</div>
 					</div>
-					<div className="field">
-						<div className="ui checkbox">
-							<input name="persistQueue" type="checkbox" onChange={this.change} checked={this.state.persistQueue}/>
-							<label>Save queue (your queue will be restored after browser restarts, page reloads, etc)</label>
+					{/* supported=false（例如 Linux 版）或还没问到回包时，这一项完全不渲染 */}
+					{this.state.autostartSupported === true ? (
+						<div className="field autostart-field">
+							<div className={'ui checkbox' + (this.state.autostartPending ? ' autostart-pending' : '')}>
+								<input name="autostart" type="checkbox" onChange={this.toggleAutostart} checked={this.state.autostartEnabled}/>
+								<label>{t('settings.autostart')}</label>
+							</div>
 						</div>
-					</div>
-					<div className="field">
-						<div className="ui checkbox">
-							<input name="repeatQueue" type="checkbox" onChange={this.change} checked={this.state.repeatQueue}/>
-							<label>Repeat queue (restart playing once the end of the queue has been reached)</label>
-						</div>
-					</div>
+					) : null}
 
 					<div className="ui section divider"></div>
 
-					<button className="ui blue button" type="submit">Save</button>
-					<button className="ui button" onClick={this.demo}>Demo Server</button>
+					<button className="ui blue button" type="submit">{t('settings.save')}</button>
+					<button className="ui button" onClick={this.demo}>{t('settings.demo')}</button>
 					<button className="ui icon button" onClick={this.test}>
 						<i className={testIcon + " icon"}></i>
-						Test Connection
+						{t('settings.test')}
 					</button>
 				</form>
 
-				<Prompt ref={(r) => {this.demoPrompt = r;} } title="Use Demo Server"
-					message="Reconfigure to use the Subsonic demo server? Please see http://www.subsonic.org/pages/demo.jsp for more information."
-					ok="Yes" cancel="No" icon="red question" />
+				<Prompt ref={(r) => {this.demoPrompt = r;} } title={t('settings.demoTitle')}
+					message={t('settings.demoMessage')}
+					ok={t('settings.yes')} cancel={t('settings.no')} icon="red question" />
 			</div>
 		);
 	}

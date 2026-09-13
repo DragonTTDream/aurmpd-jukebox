@@ -9,6 +9,7 @@ import ArtistList from './browser'
 import {TabGroup, ImageViewer} from './common'
 import Settings from './settings'
 import {ArrayDeleteElement} from '../util'
+import {t, getLanguage, onLanguageChange, offLanguageChange} from '../i18n'
 
 export default class App extends Component {
 
@@ -18,7 +19,7 @@ export default class App extends Component {
 		this.state = {
 			subsonic: props.subsonic,
 			trackBuffer: props.trackBuffer,
-			persistQueue: props.persistQueue
+			lang: getLanguage()
 		}
 
 		this.events = new Events();
@@ -27,6 +28,28 @@ export default class App extends Component {
 			subscriber: this,
 			event: ["appSettings"]
 		});
+
+		// re-render the whole tree (and refresh <title>/lang) on a language switch
+		this.languageChanged = this.languageChanged.bind(this);
+		onLanguageChange(this.languageChanged);
+	}
+
+	componentDidMount() {
+		this.applyDocumentLanguage();
+	}
+
+	componentWillUnmount() {
+		offLanguageChange(this.languageChanged);
+	}
+
+	languageChanged(lang) {
+		this.setState({lang: lang});
+		this.applyDocumentLanguage();
+	}
+
+	applyDocumentLanguage() {
+		document.title = t('app.title');
+		document.documentElement.lang = getLanguage();
 	}
 
 	receive(event) {
@@ -34,14 +57,13 @@ export default class App extends Component {
 			if (this.playerExtras) this.playerExtras.terminate();
 			this.setState({
 				subsonic: event.data.subsonic,
-				trackBuffer: event.data.trackBuffer,
-				persistQueue: event.data.persistQueue
+				trackBuffer: event.data.trackBuffer
 			});
 		}
 	}
 
 	render() {	
-		var player = <Player subsonic={this.state.subsonic} events={this.events} trackBuffer={this.state.trackBuffer} persist={this.state.persistQueue} />;
+		var player = <Player subsonic={this.state.subsonic} events={this.events} trackBuffer={this.state.trackBuffer} />;
 
 		var selection = <Selection subsonic={this.state.subsonic} events={this.events} iconSize="20" />;
 		var playlists = <PlaylistManager subsonic={this.state.subsonic} events={this.events} iconSize="20" />;
@@ -54,10 +76,10 @@ export default class App extends Component {
 		var messages = <Messages events={this.events} />;
 
 		var tabs = [];
-		tabs.push({id:"selection", title: "Selection", active: true, icon: "chevron right"});
-		tabs.push({id:"playlists", title: "Playlists", icon: "teal list"});
-		tabs.push({id:"playing", title: "Queue", icon: "olive play"});
-		tabs.push({id:"settings", title: "Settings", icon: "setting"});
+		tabs.push({id:"selection", title: t('app.tab.selection'), active: true, icon: "chevron right"});
+		tabs.push({id:"playlists", title: t('app.tab.playlists'), icon: "teal list"});
+		tabs.push({id:"playing", title: t('app.tab.queue'), icon: "olive play"});
+		tabs.push({id:"settings", title: t('app.tab.settings'), icon: "setting"});
 
 		var tabGroup = <TabGroup tabs={tabs} iconSize="20" />;
 
@@ -66,7 +88,7 @@ export default class App extends Component {
 		return (
 			<div>
 				<Links />
-				<ImageViewer title="Image Viewer" events={this.events} />
+				<ImageViewer title={t('imageViewer.title')} events={this.events} />
 				<div className="browser-frame">
 					<div className="artistList">{artistList}</div>
 				</div>
@@ -169,7 +191,7 @@ class Links extends Component {
 			<div className="links">
 				<a href="https://github.com/breezecloud/aurmpd">
 					<i className="github icon"></i>
-					<span>Aurmpd on GitHub</span>
+					<span>{t('app.github')}</span>
 				</a>
 			</div>
 		);

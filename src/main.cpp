@@ -23,7 +23,11 @@ static const char *s_listen_on = "0.0.0.0:8600";
 static int s_debug_level = MG_LL_INFO; //MG_LL_NONE, MG_LL_ERROR, MG_LL_INFO, MG_LL_DEBUG, MG_LL_VERBOSE
 static const char *s_root_dir = "./htdocs";
 
-int force_exit = 0;
+// 退出标志：被信号处理器、主循环和多个工作线程读写。
+// 必须是 volatile，否则 -O3 下编译器会把读取优化到寄存器里，
+// 导致其它线程写的 1 永远读不到 —— 实测表现为「收到 CLOSE 却不退出，
+// 托盘退出后进程残留、占着安装目录删不掉」。
+volatile sig_atomic_t force_exit = 0;
 
 void bye(){
     force_exit = 1;
@@ -73,6 +77,11 @@ static void start_thread(void *(*f)(void *), void *p) {
                 sleep(1);
                 if(pipe_poll(p)){
                     bye();
+                    // 兜底：给主循环一点时间完成清理（mpd_clear_all 等），
+                    // 然后确保进程真的结束。否则一旦主循环没能及时退出，
+                    // aurmpd.exe 会残留在后台，占着安装目录导致无法删除。
+                    sleep(2);
+                    ExitProcess(0);
                     break;
                 }
             }        
@@ -106,9 +115,16 @@ static void server_callback(struct mg_connection *c, int ev, void *ev_data) {
             }else{
                 callback_http(c,hm,s_root_dir);
             }
-            MG_INFO(("%.*s %.*s %lu -> %.*s %lu", hm->method.len, hm->method.buf,
-                    hm->uri.len, hm->uri.buf, hm->body.len, 3, c->send.buf + 9,
-                    c->send.len));  
+            // 日志里的响应预览必须防空：某些路径（方法不匹配、升级 WS 等）
+            // 不会写 c->send，直接读 c->send.buf + 9 是越界读，实测会 SIGSEGV
+            if (c->send.buf != NULL && c->send.len > 9) {
+                MG_INFO(("%.*s %.*s %lu -> %.*s %lu", hm->method.len, hm->method.buf,
+                        hm->uri.len, hm->uri.buf, hm->body.len, 3, c->send.buf + 9,
+                        c->send.len));
+            } else {
+                MG_INFO(("%.*s %.*s %lu -> (no reply body)", hm->method.len, hm->method.buf,
+                        hm->uri.len, hm->uri.buf, hm->body.len));
+            }  
             break;
         case MG_EV_CLOSE:
             break;
@@ -143,6 +159,8 @@ int main(int argc, char **argv)
 
     mpd.port = 6600;
     strcpy(mpd.host, "127.0.0.1");
+
+    mpd_lock_init(); // must run before any thread touches mpd.conn
     
     mg_mgr_init(&mgr);  // 初始化事件管理器
     #ifdef _WIN32

@@ -1,2 +1,35 @@
-build
-.vscode
+# ── 构建产物与依赖（不入库）────────────────────────────
+build/
+build-win/
+node_modules/
+aurial/node_modules/
+*.o
+*.obj
+*.exe
+*.dll
+!libmpdclient-2.dll.placeholder
+
+# ── 运行期数据（mpd 数据库/日志/歌单、本地配置）────────
+.mpd/
+mpd.conf
+*.mpd.db
+*.log
+*.pid
+*.state
+
+# ── 本地/内部工作文档（保留在开发机，不入库）──────────
+ANALYSIS.md
+FIX-PLAN.md
+ui-shots/
+*.diagnose.txt
+aurmpd-diagnose.txt
+
+# ── 编辑器 / 系统 ──────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# 根目录工作副本（脱敏版在 docs/FEATURES.md）
+/FEATURES.md

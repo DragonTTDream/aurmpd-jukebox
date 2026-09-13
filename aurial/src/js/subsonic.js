@@ -1,4 +1,9 @@
 import md5 from 'blueimp-md5'
+import {t} from './i18n'
+
+// Every request is aborted after this many milliseconds so a dead/hanging
+// server can never leave a loader spinning forever.
+const REQUEST_TIMEOUT = 10000;
 
 /**
 * Subsonic API client.
@@ -17,6 +22,10 @@ import md5 from 'blueimp-md5'
 *     // ...
 *   }
 * })
+*
+* Every method always ends in a catch(), so a failure (bad HTTP status, a
+* non-JSON body, a timeout, ...) always reaches the error callback instead of
+* silently dropping the promise chain.
 */
 export default class Subsonic {
 
@@ -61,15 +70,57 @@ export default class Subsonic {
 		return result;
 	}
 
+	/**
+	* Fetch a URL and resolve with the parsed JSON body.
+	*
+	* Rejects with an Error for: network failure, non-2xx status, invalid JSON,
+	* or a request that exceeded REQUEST_TIMEOUT.
+	*/
+	fetchJson(url, options) {
+		var opts = Object.assign({mode: 'cors'}, options || {});
+		var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+		var timer = null;
+
+		if (controller) {
+			opts.signal = controller.signal;
+			timer = setTimeout(function() {
+				controller.abort();
+			}, REQUEST_TIMEOUT);
+		}
+
+		function clearTimer() {
+			if (timer) {
+				clearTimeout(timer);
+				timer = null;
+			}
+		}
+
+		return fetch(url, opts).then(function(response) {
+			clearTimer();
+			if (!response.ok) {
+				throw new Error(t('errors.httpStatus', {status: response.status}));
+			}
+			return response.json();
+		}, function(error) {
+			clearTimer();
+			if (controller && controller.signal.aborted) {
+				throw new Error(t('errors.timeout', {seconds: REQUEST_TIMEOUT / 1000}));
+			}
+			throw error;
+		});
+	}
+
+	responseError(data, fallback) {
+		var error = data && data['subsonic-response'] ? data['subsonic-response'].error : null;
+		return new Error((error && error.message) ? error.message : fallback);
+	}
+
 	ping(params) {
-		fetch(this.getUrl('ping', {}), {
-			mode: 'cors',
+		this.fetchJson(this.getUrl('ping', {}), {
 			cache: 'no-cache'
 		})
-		.then(function(result) {
-			result.json().then(function(data) {
-				params.success(data['subsonic-response']);
-			});
+		.then(function(data) {
+			params.success(data['subsonic-response']);
 		})
 		.catch(function(error) {
 			params.error(error);
@@ -77,34 +128,30 @@ export default class Subsonic {
 	}
 
 	getArtists(params) {
-		fetch(this.getUrl('getArtists', {}), {
-			mode: 'cors'
-		})
-		.then(function(result) {
-			result.json().then(function(data) {
-				var allArtists = [];
+		this.fetchJson(this.getUrl('getArtists', {}))
+		.then(function(data) {
+			var allArtists = [];
 
-				// get artists from their letter-based groups into a flat collection
-				data['subsonic-response'].artists.index.map(function(letter) {
-					letter.artist.map(function(artist) {
-						allArtists.push(artist);
-					});
+			// get artists from their letter-based groups into a flat collection
+			data['subsonic-response'].artists.index.map(function(letter) {
+				letter.artist.map(function(artist) {
+					allArtists.push(artist);
 				});
-
-				// sort artists ignoring the 'ignored articles', such as 'The' etc
-				var ignoredArticles = data['subsonic-response'].artists.ignoredArticles.split(' ');
-				allArtists.sort(function(a, b) {
-					var at = a.name;
-					var bt = b.name;
-					for (var i = ignoredArticles.length - 1; i >= 0; i--) {
-						if (at.indexOf(ignoredArticles[i] + ' ') == 0) at = at.replace(ignoredArticles[i] + ' ', '');
-						if (bt.indexOf(ignoredArticles[i] + ' ') == 0) bt = bt.replace(ignoredArticles[i] + ' ', '');
-					};
-					return at.localeCompare(bt);
-				});
-
-				params.success({artists: allArtists});
 			});
+
+			// sort artists ignoring the 'ignored articles', such as 'The' etc
+			var ignoredArticles = data['subsonic-response'].artists.ignoredArticles.split(' ');
+			allArtists.sort(function(a, b) {
+				var at = a.name;
+				var bt = b.name;
+				for (var i = ignoredArticles.length - 1; i >= 0; i--) {
+					if (at.indexOf(ignoredArticles[i] + ' ') == 0) at = at.replace(ignoredArticles[i] + ' ', '');
+					if (bt.indexOf(ignoredArticles[i] + ' ') == 0) bt = bt.replace(ignoredArticles[i] + ' ', '');
+				};
+				return at.localeCompare(bt);
+			});
+
+			params.success({artists: allArtists});
 		})
 		.catch(function(error) {
 			params.error(error);
@@ -112,20 +159,17 @@ export default class Subsonic {
 	}
 
 	getArtist(params) {
-		fetch(this.getUrl('getArtist', {id: params.id}), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				var albums = data['subsonic-response'].artist.album;
+		this.fetchJson(this.getUrl('getArtist', {id: params.id}))
+		.then(function(data) {
+			var albums = data['subsonic-response'].artist.album;
 
-				if (albums.length > 1) {
-					albums.sort(function(a, b) {
-						return (a.year || 0) - (b.year || 0);
-					});
-				}
+			if (albums.length > 1) {
+				albums.sort(function(a, b) {
+					return (a.year || 0) - (b.year || 0);
+				});
+			}
 
-				params.success({albums: albums});
-			});
+			params.success({albums: albums});
 		})
 		.catch(function(error) {
 			params.error(error);
@@ -133,18 +177,15 @@ export default class Subsonic {
 	}
 
 	getAlbum(params) {
-		fetch(this.getUrl('getAlbum', {id: params.id}), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				var album = data['subsonic-response'].album;
-				album.song.sort(function(a, b) {
-					return a.discNumber && b.discNumber
-					? ((a.discNumber*1000) + a.track) - ((b.discNumber*1000) + b.track)
-					: a.track - b.track;
-				});
-				params.success({album: album});
-			})
+		this.fetchJson(this.getUrl('getAlbum', {id: params.id}))
+		.then(function(data) {
+			var album = data['subsonic-response'].album;
+			album.song.sort(function(a, b) {
+				return a.discNumber && b.discNumber
+				? ((a.discNumber*1000) + a.track) - ((b.discNumber*1000) + b.track)
+				: a.track - b.track;
+			});
+			params.success({album: album});
 		})
 		.catch(function(error) {
 			params.error(error);
@@ -152,12 +193,9 @@ export default class Subsonic {
 	}
 
 	getPlaylists(params) {
-		fetch(this.getUrl('getPlaylists', {}), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				params.success({playlists: data['subsonic-response'].playlists.playlist});
-			});
+		this.fetchJson(this.getUrl('getPlaylists', {}))
+		.then(function(data) {
+			params.success({playlists: data['subsonic-response'].playlists.playlist});
 		})
 		.catch(function(error) {
 			params.error(error);
@@ -165,12 +203,9 @@ export default class Subsonic {
 	}
 
 	getPlaylist(params) {
-		fetch(this.getUrl('getPlaylist', {id: params.id}), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				params.success({playlist: data['subsonic-response'].playlist});
-			});
+		this.fetchJson(this.getUrl('getPlaylist', {id: params.id}))
+		.then(function(data) {
+			params.success({playlist: data['subsonic-response'].playlist});
 		})
 		.catch(function(error) {
 			params.error(error);
@@ -178,17 +213,14 @@ export default class Subsonic {
 	}
 
 	createPlaylist(params) {
-		fetch(this.getUrl('createPlaylist', {name: params.name, songId: params.tracks}), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				if (data['subsonic-response'].status == "ok") {
-					params.success();
-				} else {
-					params.error(data['subsonic-response'].error.message);
-				}
-			});
-		})
+		this.fetchJson(this.getUrl('createPlaylist', {name: params.name, songId: params.tracks}))
+		.then(function(data) {
+			if (data['subsonic-response'].status == "ok") {
+				params.success();
+			} else {
+				throw this.responseError(data, "Failed to create playlist");
+			}
+		}.bind(this))
 		.catch(function(error) {
 			params.error(error);
 		});
@@ -201,46 +233,37 @@ export default class Subsonic {
 		if (params.add) options.songIdToAdd = params.add;
 		if (params.remove) options.songIndexToRemove = params.remove;
 
-		fetch(this.getUrl('updatePlaylist', options), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				if (data['subsonic-response'].status == "ok") {
-					params.success();
-				} else {
-					params.error(data['subsonic-response'].error.message);
-				}
-			});
-		})
+		this.fetchJson(this.getUrl('updatePlaylist', options))
+		.then(function(data) {
+			if (data['subsonic-response'].status == "ok") {
+				params.success();
+			} else {
+				throw this.responseError(data, "Failed to update playlist");
+			}
+		}.bind(this))
 		.catch(function(error) {
 			params.error(error);
 		});
 	}
 
 	deletePlaylist(params) {
-		fetch(this.getUrl('deletePlaylist', {id: params.id}), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				if (data['subsonic-response'].status == "ok") {
-					params.success();
-				} else {
-					params.error(data['subsonic-response'].error.message);
-				}
-			});
-		})
+		this.fetchJson(this.getUrl('deletePlaylist', {id: params.id}))
+		.then(function(data) {
+			if (data['subsonic-response'].status == "ok") {
+				params.success();
+			} else {
+				throw this.responseError(data, "Failed to delete playlist");
+			}
+		}.bind(this))
 		.catch(function(error) {
 			params.error(error);
 		});
 	}
 
 	search(params) {
-		fetch(this.getUrl('search3', {query: params.query, songCount: params.songCount}), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				params.success(data['subsonic-response'].searchResult3);
-			});
+		this.fetchJson(this.getUrl('search3', {query: params.query, songCount: params.songCount}))
+		.then(function(data) {
+			params.success(data['subsonic-response'].searchResult3);
 		})
 		.catch(function(error) {
 			params.error(error);
@@ -248,12 +271,9 @@ export default class Subsonic {
 	}
 
 	scrobble(params) {
-		fetch(this.getUrl('scrobble', {id: params.id}), {
-			mode: 'cors'
-		}).then(function(result) {
-			result.json().then(function(data) {
-				params.success();
-			});
+		this.fetchJson(this.getUrl('scrobble', {id: params.id}))
+		.then(function(data) {
+			params.success();
 		})
 		.catch(function(error) {
 			params.error(error);

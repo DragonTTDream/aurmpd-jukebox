@@ -1,4 +1,5 @@
 import {Messages} from './jsx/app'
+import {t} from './i18n'
 
 /**
 * The Player Extras class initialises a bunch of extra non-critical things.
@@ -71,7 +72,7 @@ class Scrobbler {
 					error: function(e) {
 						this.submitted = null;
 						console.error("Scrobble failed for track " + playing.title, e);
-						Messages.message(this.events, "Scrobble failed for track " + playing.title, "warning", "warning");
+						Messages.message(this.events, t('errors.scrobbleFailed', {title: playing.title}), "warning", "warning");
 					}.bind(this)
 				});
 			}

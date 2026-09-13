@@ -1,6 +1,7 @@
 import { h, Component } from 'preact';
 import {IconMessage,CoverArt} from './common'
 import {SecondsToTime} from '../util'
+import {t} from '../i18n'
 
 export default class TrackList extends Component {
 
@@ -57,22 +58,24 @@ export default class TrackList extends Component {
 		}
 
 		return (
+			<div className="trackList-scroll">
 			<table className="ui selectable single line very basic compact table trackList">
 				<thead>
 					<tr>
 						<th className="controls">&nbsp;</th>
-						<th className="number">#</th>
-						<th className="artist">Artist</th>
-						<th className="title">Title</th>
-						<th className="album">Album</th>
-						<th className="date">Date</th>
-						<th className="right aligned duration">Duration</th>
+						<th className="number">{t('tracklist.number')}</th>
+						<th className="artist">{t('tracklist.artist')}</th>
+						<th className="title">{t('tracklist.title')}</th>
+						<th className="album">{t('tracklist.album')}</th>
+						<th className="date">{t('tracklist.date')}</th>
+						<th className="right aligned duration">{t('tracklist.duration')}</th>
 					</tr>
 				</thead>
 				<tbody>
 					{tracks}
 				</tbody>
 			</table>
+			</div>
 		);
 	}
 }
@@ -115,13 +118,13 @@ class Track extends Component {
 		var playlistButton;
 		if (this.props.playlist) {
 			playlistButton = (
-				<button className="ui mini compact icon teal button" title="Remove from playlist" onClick={this.playlistRemove}>
+				<button className="ui mini compact icon teal button" title={t('tracklist.removeFromPlaylist')} onClick={this.playlistRemove}>
 					<i className="minus icon"></i>
 				</button>
 			);
 		} else {
 			playlistButton = (
-				<button className="ui mini compact icon teal button" title="Add to playlist" onClick={this.playlistAdd}>
+				<button className="ui mini compact icon teal button" title={t('tracklist.addToPlaylist')} onClick={this.playlistAdd}>
 					<i className="list icon"></i>
 				</button>
 			);
@@ -129,9 +132,9 @@ class Track extends Component {
 
 		return (
 			<tr className={this.props.playing ? "positive" : ""}>
-				<td>
-					<button className="ui mini compact icon green button" onClick={this.play} title="Play now"><i className="play icon"></i></button>
-					<button className="ui mini compact icon olive button" onClick={this.enqueue} title={this.props.queued ? "Remove from queue" : "Add to queue"}>
+				<td className="controls">
+					<button className="ui mini compact icon green button" onClick={this.play} title={t('tracklist.playNow')}><i className="play icon"></i></button>
+					<button className="ui mini compact icon olive button" onClick={this.enqueue} title={this.props.queued ? t('tracklist.removeFromQueue') : t('tracklist.addToQueue')}>
 						<i className={this.props.queued ? "minus icon" : "plus icon"}></i>
 					</button>
 					{playlistButton}

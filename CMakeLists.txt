@@ -35,8 +35,10 @@ if(WIN32)
     endif()
     # 设置资源文件路径
     set(RESOURCE_FILE "${CMAKE_SOURCE_DIR}/src/resource.rc")
-    # 设置资源编译器为 windres（MinGW）
-    set(CMAKE_RC_COMPILER windres)
+    # 设置资源编译器为 windres（MinGW）；如果外部工具链已经指定（例如交叉编译）则沿用
+    if(NOT CMAKE_RC_COMPILER)
+        set(CMAKE_RC_COMPILER windres)
+    endif()
     # 定义资源文件的编译命令（生成COFF格式对象文件）
     set(CMAKE_RC_COMPILE_OBJECT
         "<CMAKE_RC_COMPILER> <FLAGS> -O coff <DEFINES> -i <SOURCE> -o <OBJECT>"

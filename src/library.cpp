@@ -1,6 +1,32 @@
 #include "library.hpp"
 
+#include <cerrno>
+#include <cstdlib>
+
 using json = nlohmann::json;
+
+/*
+ * Parse an integer tag without ever throwing. Audio tags are user data: they
+ * can be missing, empty, or non-numeric ("", "live", "-", ...), which used to
+ * make std::stoi throw std::invalid_argument and terminate the process.
+ * Parses the leading digits (so "1/12" -> 1) and falls back to `fallback`
+ * when there are none. Keeps the previous field semantics.
+ */
+static int parseIntOr(const std::string& value, int fallback)
+{
+    const char *begin = value.c_str();
+    char *end = nullptr;
+
+    if (begin == nullptr || *begin == '\0')
+        return fallback;
+
+    errno = 0;
+    long parsed = std::strtol(begin, &end, 10);
+    if (end == begin || errno == ERANGE)
+        return fallback;
+
+    return static_cast<int>(parsed);
+}
 
 // 定义 Library 类来管理本地歌曲库
 //清除历史记录
@@ -12,9 +38,13 @@ void Library::clear(){
 }
 // 初始化函数
 bool Library::getMpdDB() {
+    // The shared mpd connection is also used by the poll thread and by the WS
+    // command handler: serialise all libmpdclient access.
+    mpd_lock();
     //clear();
     if (!mpd_send_list_all_meta(mpd.conn, nullptr)) {
         std::cerr << "Failed to send list all meta request: " << mpd_connection_get_error_message(mpd.conn) << std::endl;
+        mpd_unlock();
         return false;
     }      
     struct mpd_entity* entity;
@@ -35,11 +65,11 @@ bool Library::getMpdDB() {
             std::string album = album_cstr ? album_cstr : "unknown";
             std::string genre = genre_cstr ? genre_cstr : "unknown";
             std::string url = url_cstr ? url_cstr : "unknown";
-            std::string date = date_cstr ? date_cstr : "1900";
-            int year = std::stoi(date.substr(0, 4));//取前4位
+            std::string date = date_cstr ? date_cstr : "";
+            int year = parseIntOr(date.substr(0, date.size() < 4 ? date.size() : 4), 1900);//取前4位，空/非数字回退 1900
             Song newSong(url,artist,title,album,url);
             newSong.setDuration(duration);
-            newSong.setTrack(std::stoi(track));
+            newSong.setTrack(parseIntOr(track, 0));//空/非数字回退 0
             newSong.setYear(year);
             if(!findAlbum(album)){//找不到专辑，新增专辑
                 Album newAlbum(album,artist,album,year);
@@ -49,6 +79,7 @@ bool Library::getMpdDB() {
         }
         mpd_entity_free(entity);
     }
+    mpd_unlock();
     return true;
 }
 

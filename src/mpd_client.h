@@ -68,7 +68,12 @@
     X(MPD_API_TOGGLE_CONSUME) \
     X(MPD_API_TOGGLE_SINGLE) \
     X(MPD_API_TOGGLE_CROSSFADE) \
-    X(MPD_API_TOGGLE_REPEAT)
+    X(MPD_API_TOGGLE_REPEAT) \
+    X(MPD_API_GET_PLAYLISTS) \
+    X(MPD_API_GET_PLAYLIST_SONGS) \
+    X(MPD_API_RM_PLAYLIST) \
+    X(MPD_API_GET_AUTOSTART) \
+    X(MPD_API_SET_AUTOSTART)
 
 enum mpd_cmd_ids {
     MPD_CMDS(GEN_ENUM)
@@ -113,6 +118,33 @@ struct thread_data {
 
 };
 
+/*
+ * Coarse-grained recursive mutex protecting the single shared libmpdclient
+ * connection (mpd.conn). It is touched by the mongoose event thread
+ * (callback_mpd / http_server / library / mpdqueue) and by the 1 Hz poll
+ * thread (mpd_poll), which is the root cause of the "already done processing
+ * current command"/"disconnected" failures.
+ *
+ * mpd_lock_init() must be called once, before any thread starts.
+ *
+ * Wrapped in extern "C" because this header is also included from C++ units
+ * that do not wrap it (e.g. http_server.hpp), which would otherwise give these
+ * symbols C++ linkage and fail to link against the C definitions.
+ */
+#ifdef __cplusplus
+extern "C" {
+#endif
+void mpd_lock_init(void);
+void mpd_lock(void);
+void mpd_unlock(void);
+/* 队列同步入口：由 http_server.cpp 定义，mpd_poll() 在连接/重连成功以及
+ * mpd queue_version 变化时调用，把 mpd 当前队列同步回内部队列。
+ * 放在 extern "C" 块里，保证 C（mpd_client.c）与 C++ 两侧链接一致。 */
+void queue_sync_from_mpd(void);
+#ifdef __cplusplus
+}
+#endif
+
 void mpd_poll(struct thread_data *p);
 void callback_mpd(struct mg_connection *c,struct mg_ws_message *wm);
 int mpd_close_handler(struct mg_connection *c);
@@ -121,6 +153,8 @@ int mpd_put_outputs(char *buffer, int putnames);
 int mpd_put_current_song(char *buffer);
 int mpd_put_queue(char *buffer, unsigned int offset);
 int mpd_put_browse(char *buffer, char *path, unsigned int offset);
+int mpd_put_playlists(char *buffer);
+int mpd_put_playlist_songs(char *buffer, const char *name);
 int mpd_search(char *buffer, char *searchstr);
 void mpd_disconnect();
 void mpd_clear_all();

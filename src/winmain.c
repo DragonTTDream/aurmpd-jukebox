@@ -1,7 +1,14 @@
+/* 让 PKEY_* 等 GUID 在本编译单元内直接定义（Windows SDK 与 MinGW 通用做法），
+   否则 functiondiscoverykeys_devpkey.h 只留 extern 声明，链接时报 undefined reference */
+#define INITGUID
+
 #include <windows.h>
 #include <shellapi.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
+#include <ctype.h>
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>
@@ -17,6 +24,8 @@ typedef int bool;
 #define IDM_EXIT 100
 #define IDM_OPEN 101
 #define IDM_ABOUT 102
+// 开机自启勾选项（100~102 已被占用，勿冲突）
+#define IDM_AUTOSTART 103
 
 #define TARGET_URL L"http://127.0.0.1:8600"
 #define PIPE_NAME L"\\\\.\\pipe\\AurmpdPipe"
@@ -28,8 +37,173 @@ HWND hWnd;
 HANDLE hChildProcess_mpd = NULL;
 HANDLE hChildProcess_aurmpd = NULL;
 
+// 子进程所属的 Job 对象：设置 KILL_ON_JOB_CLOSE，这样启动器无论以何种方式退出
+//（正常退出 / 崩溃 / 被任务管理器结束）都会连带结束 mpd 与 aurmpd，
+// 避免残留进程占着目录导致旧版本删不掉。
+static HANDLE g_job = NULL;
+
+// 把子进程加入 Job。Job 创建失败、或当前进程已在别的 Job 中导致加入失败时，
+// 静默降级为“仅靠显式关闭逻辑”，不影响正常使用。
+static void AssignChildToJob(HANDLE hProcess) {
+    if (g_job == NULL) {
+        g_job = CreateJobObjectW(NULL, NULL);
+        if (g_job != NULL) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+            memset(&jeli, 0, sizeof(jeli));
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!SetInformationJobObject(g_job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
+                CloseHandle(g_job);
+                g_job = NULL;
+            }
+        }
+    }
+    if (g_job != NULL && hProcess != NULL) {
+        AssignProcessToJobObject(g_job, hProcess);
+    }
+}
+
+// exe 所在目录（不含结尾反斜杠）。启动时确定一次，之后 mpd.conf / mpd.exe /
+// aurmpd.exe / htdocs 一律相对它解析，不再依赖进程初始工作目录。
+static wchar_t g_exeDir[MAX_PATH] = {0};
+
 // 前置声明 GracefullyCloseProcess 函数
 BOOL GracefullyCloseProcess(HANDLE hProcess);
+
+// 开机自启辅助函数（定义在文件后部，WndProc 中需提前使用）
+static BOOL IsAutostartEnabled(void);
+static BOOL SetAutostartEnabled(BOOL enable);
+
+// 取 exe 所在目录；失败时回退到当前工作目录，保证 g_exeDir 非空
+BOOL GetExeDirectory(wchar_t* dir, size_t cch) {
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        wchar_t* slash = wcsrchr(path, L'\\');
+        if (slash != NULL) {
+            *slash = L'\0';
+            if (wcsncpy_s(dir, cch, path, _TRUNCATE) == 0) {
+                return TRUE;
+            }
+        }
+    }
+    if (GetCurrentDirectoryW((DWORD)cch, dir) != 0) {
+        return TRUE;
+    }
+    dir[0] = L'\0';
+    return FALSE;
+}
+
+// 把 exe 目录转成 UTF-8、正斜杠形式，供 mpd.conf 的 music_directory 使用
+static void ExeDirToUtf8Slashes(char* out, size_t cch) {
+    char tmp[MAX_PATH * 4];
+    size_t j = 0;
+    int len;
+    if (cch == 0) return;
+    out[0] = '\0';
+    if (g_exeDir[0] == L'\0') return;
+    len = WideCharToMultiByte(CP_UTF8, 0, g_exeDir, -1, tmp, sizeof(tmp), NULL, NULL);
+    if (len <= 0) return;
+    for (int i = 0; tmp[i] != '\0' && j + 1 < cch; ++i) {
+        out[j++] = (tmp[i] == '\\') ? '/' : tmp[i];
+    }
+    out[j] = '\0';
+}
+
+/* 规范化 mpd.conf 里的 music_directory：
+ *   - 反斜杠 \ 一律换成 /（mpd.conf 里 \ 是转义符，Windows 习惯写法会解析失败）
+ *   - 相对路径补成「相对 exe 目录」的绝对路径
+ * 只处理生效的 music_directory 行；原本被 # 注释掉的行原样保留。
+ * 其余行逐字节原样写回。 */
+static void NormalizeMusicDirectory(const char* conf_path) {
+    static const char key[] = "music_directory";
+    size_t klen = sizeof(key) - 1;
+    FILE* f;
+    long sz;
+    size_t rd, cap, olen = 0;
+    char *data, *out, *p;
+    char exeUtf8[MAX_PATH * 4];
+
+    f = fopen(conf_path, "rb");
+    if (f == NULL) return;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
+    sz = ftell(f);
+    if (sz <= 0 || sz > 1024 * 1024) { fclose(f); return; }
+    rewind(f);
+    data = (char*)malloc((size_t)sz + 1);
+    if (data == NULL) { fclose(f); return; }
+    rd = fread(data, 1, (size_t)sz, f);
+    fclose(f);
+    data[rd] = '\0';
+
+    ExeDirToUtf8Slashes(exeUtf8, sizeof(exeUtf8));
+
+    cap = (size_t)sz * 2 + 256;
+    out = (char*)malloc(cap);
+    if (out == NULL) { free(data); return; }
+
+    p = data;
+    while (*p != '\0') {
+        char* nl = strchr(p, '\n');
+        size_t llen = nl ? (size_t)(nl - p) : strlen(p); /* 不含 '\n' */
+        size_t i = 0, v, vend;
+        int handled = 0;
+
+        while (i < llen && (p[i] == ' ' || p[i] == '\t')) i++;
+        if (p[i] != '#' && llen >= i + klen && strncmp(p + i, key, klen) == 0 &&
+            (i + klen == llen || p[i + klen] == ' ' || p[i + klen] == '\t')) {
+            v = i + klen;
+            while (v < llen && (p[v] == ' ' || p[v] == '\t')) v++;
+            vend = llen;
+            while (vend > v && (p[vend - 1] == '\r' || p[vend - 1] == ' ' || p[vend - 1] == '\t')) vend--;
+            if (vend > v) {
+                char val[MAX_PATH * 4];
+                char* inner;
+                size_t vlen = vend - v;
+                int absolute;
+                if (vlen >= sizeof(val)) vlen = sizeof(val) - 1;
+                memcpy(val, p + v, vlen);
+                val[vlen] = '\0';
+                inner = val;
+                if (strlen(inner) >= 2 && inner[0] == '"' && inner[strlen(inner) - 1] == '"') {
+                    inner[strlen(inner) - 1] = '\0';
+                    inner++;
+                }
+                for (char* q = inner; *q != '\0'; ++q) {
+                    if (*q == '\\') *q = '/';
+                }
+                absolute = (inner[0] == '/') ||
+                           (isalpha((unsigned char)inner[0]) && inner[1] == ':');
+                if (!absolute && exeUtf8[0] != '\0') {
+                    olen += (size_t)snprintf(out + olen, cap - olen,
+                        "%.*smusic_directory \"%s/%s\"", (int)i, p, exeUtf8, inner);
+                } else {
+                    olen += (size_t)snprintf(out + olen, cap - olen,
+                        "%.*smusic_directory \"%s\"", (int)i, p, inner);
+                }
+                handled = 1;
+            }
+        }
+        if (!handled) {
+            memcpy(out + olen, p, llen);
+            olen += llen;
+        }
+        if (nl != NULL) {
+            out[olen++] = '\n';
+            p = nl + 1;
+        } else {
+            break;
+        }
+    }
+    out[olen] = '\0';
+
+    f = fopen(conf_path, "wb");
+    if (f != NULL) {
+        fwrite(out, 1, olen, f);
+        fclose(f);
+    }
+    free(out);
+    free(data);
+}
 
 
 // 获取默认音频播放设备名称
@@ -131,6 +305,8 @@ BOOL CheckAndCopyFiles() {
                 // 关闭文件
                 fclose(src);
                 fclose(dst);
+                // 规范化新生成的 music_directory（斜杠 + 绝对路径）
+                NormalizeMusicDirectory("mpd.conf");
                 return TRUE;
             } else {
                 if (src) fclose(src);
@@ -183,28 +359,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ShowWindow(hwnd, SW_MINIMIZE);
 
             // 启动子进程
-            STARTUPINFO si = { sizeof(STARTUPINFO) };
-            si.cb = sizeof(STARTUPINFO);
+            STARTUPINFOW si = { sizeof(STARTUPINFOW) };
+            si.cb = sizeof(STARTUPINFOW);
             si.wShowWindow = SW_HIDE; // 隐藏子进程窗口
             si.dwFlags |= STARTF_USESHOWWINDOW;
             PROCESS_INFORMATION pi;
-            // 创建mpd子进程   
-            char command1[] = "mpd.exe mpd.conf";
-            if (!CreateProcess(NULL, command1, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            // 创建mpd子进程：子进程与命令行路径一律用 exe 目录下的绝对路径
+            wchar_t command1[MAX_PATH * 3];
+            if (g_exeDir[0] != L'\0') {
+                _snwprintf(command1, MAX_PATH * 3, L"\"%s\\mpd.exe\" \"%s\\mpd.conf\"", g_exeDir, g_exeDir);
+            } else {
+                wcscpy(command1, L"mpd.exe mpd.conf");
+            }
+            if (!CreateProcessW(NULL, command1, NULL, NULL, FALSE, 0, NULL, g_exeDir[0] ? g_exeDir : NULL, &si, &pi)) {
                 MessageBox(hwnd, "Failed to start mpd process", "Error", MB_OK | MB_ICONERROR);
             } else {
                 // 保存子进程的句柄
                 hChildProcess_mpd = pi.hProcess;
+                AssignChildToJob(pi.hProcess);
                 // 关闭线程句柄，因为我们不需要它
                 CloseHandle(pi.hThread);           
             }
             // 创建aurmpd子进程   
-            char command2[] = "aurmpd.exe";
-            if (!CreateProcess(NULL, command2, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-                MessageBox(hwnd, "Failed to start mpd process", "Error", MB_OK | MB_ICONERROR);
+            wchar_t command2[MAX_PATH * 2];
+            if (g_exeDir[0] != L'\0') {
+                _snwprintf(command2, MAX_PATH * 2, L"\"%s\\aurmpd.exe\"", g_exeDir);
+            } else {
+                wcscpy(command2, L"aurmpd.exe");
+            }
+            if (!CreateProcessW(NULL, command2, NULL, NULL, FALSE, 0, NULL, g_exeDir[0] ? g_exeDir : NULL, &si, &pi)) {
+                MessageBox(hwnd, "Failed to start aurmpd process", "Error", MB_OK | MB_ICONERROR);
             } else {
                 // 保存子进程的句柄
                 hChildProcess_aurmpd = pi.hProcess;
+                AssignChildToJob(pi.hProcess);
                 // 关闭线程句柄，因为我们不需要它
                 CloseHandle(pi.hThread);                 
             }
@@ -223,7 +411,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 MessageBox(hwnd, "Failed to remove tray icon", "Error", MB_OK | MB_ICONERROR);
             }
 
-            // 通过命名管道发送CLOSE命令关闭aurmpd.exe子进程
+            // 先请求 aurmpd 优雅退出（命名管道 CLOSE），然后等它**真的**退出；
+            // 等不到就强杀，再等一次。原先只发消息不等结果，是残留进程的主因。
             if (hChildProcess_aurmpd && (hChildProcess_aurmpd != INVALID_HANDLE_VALUE)) {
                 HANDLE hPipe = CreateFileW(
                     PIPE_NAME,
@@ -234,24 +423,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     0,
                     NULL
                 );
-                //打开成功
                 if (hPipe != INVALID_HANDLE_VALUE) {
                     const char* message = "CLOSE";
                     DWORD bytesWritten;
-                    if (WriteFile(hPipe, message, (DWORD)strlen(message), &bytesWritten, NULL)) {
-                        wprintf(L"Message sent successfully.\n");
-                    } else {
+                    if (!WriteFile(hPipe, message, (DWORD)strlen(message), &bytesWritten, NULL)) {
                         wprintf(L"Failed to send message. Error code: %lu\n", GetLastError());
                     }
-                    // 关闭句柄
-                    CloseHandle(hPipe);                
-                }else{//打开pipe失败强制关闭
+                    CloseHandle(hPipe);
+                }
+                // 最多等 3 秒优雅退出，否则强杀并再等一次
+                if (WaitForSingleObject(hChildProcess_aurmpd, 3000) != WAIT_OBJECT_0) {
+                    wprintf(L"aurmpd did not exit gracefully, terminating it.\n");
                     GracefullyCloseProcess(hChildProcess_aurmpd);
-                }                 
+                    WaitForSingleObject(hChildProcess_aurmpd, 3000);
+                }
             }
-            Sleep(2000);//waiting 2s
-            if (hChildProcess_mpd && hChildProcess_mpd != INVALID_HANDLE_VALUE) {
-                GracefullyCloseProcess(hChildProcess_mpd);
+            // mpd 没有退出接口，直接终止并等它结束，避免残留进程占着 .mpd 目录
+            if (hChildProcess_mpd && (hChildProcess_mpd != INVALID_HANDLE_VALUE)) {
+                if (WaitForSingleObject(hChildProcess_mpd, 0) != WAIT_OBJECT_0) {
+                    GracefullyCloseProcess(hChildProcess_mpd);
+                    WaitForSingleObject(hChildProcess_mpd, 3000);
+                }
             }
             // 关闭进程句柄
             if (hChildProcess_mpd != NULL) {
@@ -268,11 +460,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // 处理托盘图标消息
             switch (LOWORD(lParam)) {
                 case WM_RBUTTONUP: {
+                    // 每次弹出前都重新读一次实际状态（不缓存，避免状态过期）
+                    BOOL autostartOn = IsAutostartEnabled();
                     // 创建弹出菜单
                     HMENU hMenu = CreatePopupMenu();
-                    AppendMenu(hMenu, MF_STRING, IDM_OPEN, "Open");
-                    AppendMenu(hMenu, MF_STRING, IDM_ABOUT, "About");
-                    AppendMenu(hMenu, MF_STRING, IDM_EXIT, "Exit");
+                    AppendMenuW(hMenu, MF_STRING, IDM_OPEN, L"Open");
+                    AppendMenuW(hMenu, MF_STRING | (autostartOn ? MF_CHECKED : MF_UNCHECKED), IDM_AUTOSTART, L"开机自启 / Auto start");
+                    AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About");
+                    AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
 
                     // 获取鼠标位置
                     POINT pt;
@@ -301,6 +496,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // 打开浏览器并访问指定网址
                     ShowWindow(hwnd, SW_HIDE); 
                     ShellExecuteW(hwnd, L"open", TARGET_URL, NULL, NULL, SW_SHOWNOACTIVATE);
+                    break;
+                }
+                case IDM_AUTOSTART: {
+                    // 切换开机自启；写入后立即用实际状态提示结果
+                    BOOL wantEnable = IsAutostartEnabled() ? FALSE : TRUE;
+                    if (!SetAutostartEnabled(wantEnable)) {
+                        MessageBoxW(hwnd,
+                                    wantEnable ? L"无法启用开机自启：写入注册表失败。"
+                                               : L"无法关闭开机自启：删除注册表值失败。",
+                                    L"aurmpd", MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+                    }
                     break;
                 }
                 case IDM_ABOUT: {
@@ -346,11 +552,126 @@ BOOL GracefullyCloseProcess(HANDLE hProcess) {
     return TerminateProcess(hProcess, 0);
 }
 
+// 确保 mpd 需要的 .mpd / .mpd\playlists 目录存在。
+// 压缩包解压时可能丢失空目录（zip 里没有目录项），而 mpd 一旦打不开
+// .mpd/log 或 .mpd/database 就会直接启动失败、曲库全空 —— 这里兜底创建。
+static void EnsureDataDirectories(void) {
+    CreateDirectoryW(L".mpd", NULL);
+    CreateDirectoryW(L".mpd\\playlists", NULL);
+}
+
+/* --------------------- 开机自启（与后端同一契约） ---------------------
+ * HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+ *   值名   : "aurmpd"
+ *   值内容 : "<exe 目录>\winaurmpd.exe"（带引号，路径可含空格）
+ * 存在即“已启用”，不存在即“未启用”。
+ * 注意：与 aurmpd.exe 里实现的是同一个键名/值名，两处必须保持一致。
+ * -------------------------------------------------------------------- */
+#define AUTOSTART_RUN_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+#define AUTOSTART_VALUE_NAME L"aurmpd"
+#define AUTOSTART_REG_ACCESS (KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)
+
+// 取 "<exe 目录>\winaurmpd.exe"，成功返回 TRUE
+static BOOL GetLauncherPath(wchar_t* out, size_t cch) {
+    wchar_t dir[MAX_PATH];
+    size_t need;
+
+    if (!GetExeDirectory(dir, MAX_PATH)) {
+        return FALSE;
+    }
+    if (dir[0] == L'\0') {
+        return FALSE;
+    }
+    need = wcslen(dir) + 1 + wcslen(L"winaurmpd.exe") + 1;
+    if (need > cch) {
+        return FALSE;
+    }
+    wcscpy(out, dir);
+    wcscat(out, L"\\winaurmpd.exe");
+    return TRUE;
+}
+
+// 每次弹出菜单前读一次实际状态，不缓存
+static BOOL IsAutostartEnabled(void) {
+    HKEY hkey;
+    LONG rc;
+
+    rc = RegOpenKeyExW(HKEY_CURRENT_USER, AUTOSTART_RUN_KEY, 0, AUTOSTART_REG_ACCESS, &hkey);
+    if (rc != ERROR_SUCCESS) {
+        return FALSE;
+    }
+    rc = RegQueryValueExW(hkey, AUTOSTART_VALUE_NAME, NULL, NULL, NULL, NULL);
+    RegCloseKey(hkey);
+    return (rc == ERROR_SUCCESS) ? TRUE : FALSE;
+}
+
+// 写入 / 删除自启值，成功返回 TRUE
+static BOOL SetAutostartEnabled(BOOL enable) {
+    HKEY hkey;
+    LONG rc;
+
+    if (enable) {
+        wchar_t path[MAX_PATH + 8];
+        wchar_t quoted[MAX_PATH + 12];
+
+        if (!GetLauncherPath(path, sizeof(path) / sizeof(path[0]))) {
+            return FALSE;
+        }
+        quoted[0] = L'"';
+        wcscpy(quoted + 1, path);
+        wcscat(quoted, L"\"");
+
+        rc = RegCreateKeyExW(HKEY_CURRENT_USER, AUTOSTART_RUN_KEY, 0, NULL, 0,
+                             AUTOSTART_REG_ACCESS, NULL, &hkey, NULL);
+        if (rc != ERROR_SUCCESS) {
+            return FALSE;
+        }
+        rc = RegSetValueExW(hkey, AUTOSTART_VALUE_NAME, 0, REG_SZ,
+                            (const BYTE*)quoted,
+                            (DWORD)((wcslen(quoted) + 1) * sizeof(wchar_t)));
+        RegCloseKey(hkey);
+        return (rc == ERROR_SUCCESS) ? TRUE : FALSE;
+    }
+
+    rc = RegOpenKeyExW(HKEY_CURRENT_USER, AUTOSTART_RUN_KEY, 0, AUTOSTART_REG_ACCESS, &hkey);
+    if (rc != ERROR_SUCCESS) {
+        // 键不存在 => 本来就没启用，当作成功
+        return (rc == ERROR_FILE_NOT_FOUND) ? TRUE : FALSE;
+    }
+    rc = RegDeleteValueW(hkey, AUTOSTART_VALUE_NAME);
+    RegCloseKey(hkey);
+    return (rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND) ? TRUE : FALSE;
+}
+
+/* 路径自愈：程序目录被改名 / 移动后（本项目就是靠“解压到新目录”升级），
+ * 旧注册表值会指向不存在的路径，开机自启静默失效。启动时若自启已启用，
+ * 就把值刷新成当前 exe 目录下的 winaurmpd.exe。
+ * ⚠ 只在已启用时刷新；未启用绝不能因为启动而创建自启项。 */
+static void RefreshAutostartPathIfEnabled(void) {
+    if (!IsAutostartEnabled()) {
+        return;
+    }
+    if (!SetAutostartEnabled(TRUE)) {
+        OutputDebugStringA("aurmpd: failed to refresh autostart path\n");
+    }
+}
+
 // 主函数
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR szCmdLine, int iCmdShow) {
     int argc;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    LPWSTR* argv;
     bool debugMode = false;
+
+    // 先把工作目录定到 exe 所在目录：双击 / 快捷方式 / 从任意目录启动，
+    // mpd.conf、mpd.exe、aurmpd.exe、htdocs 都解析到同一处。
+    if (GetExeDirectory(g_exeDir, MAX_PATH)) {
+        SetCurrentDirectoryW(g_exeDir);
+    }
+    EnsureDataDirectories();
+    // 自启路径自愈：仅在已启用时把注册表值刷新为当前 exe 目录
+    RefreshAutostartPathIfEnabled();
+
+    argv = CommandLineToArgvW(GetCommandLineW(), &argc);
 
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"-d") == 0) {
