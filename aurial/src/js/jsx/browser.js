@@ -95,7 +95,7 @@ export default class ArtistList extends Component {
 				this.setState({artists: data.artists, loaded: true, error: null});
 			}.bind(this),
 			error: function(err) {
-				this.setState({error: <IconMessage type="negative" icon="warning circle" header="" message={t('browser.failedArtists')} />, loaded: true});
+				this.setState({error: <IconMessage type="negative" icon="warning circle" header="" message={t('browser.failedArtists')} />, errorText: err.message, loaded: true});
 				console.error(this, err);
 				Messages.message(this.props.events, t('browser.unableArtists', {error: err.message}), "error", "warning sign");
 			}.bind(this)
@@ -124,7 +124,7 @@ export default class ArtistList extends Component {
 				artistsBody = (
 					<div className="subsonic-hint">
 						<i className="plug icon"></i>
-						{tOr('browser.artistsOffline', isZh ? '未连接 Subsonic，可在设置里填写' : 'Subsonic not connected \u2014 check Settings')}
+						{tOr('browser.artistsOffline', isZh ? '未连接 Subsonic，可在设置里填写' : 'Subsonic not connected \u2014 check Settings')}{this.state.errorText ? '（' + this.state.errorText + '）' : ''}
 					</div>
 				);
 			} else {
