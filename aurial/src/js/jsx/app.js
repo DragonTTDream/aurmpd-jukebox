@@ -88,7 +88,6 @@ export default class App extends Component {
 
 		return (
 			<div>
-				<Links />
 				<ImageViewer title={t('imageViewer.title')} events={this.events} />
 				<div className="browser-frame">
 					<div className="artistList">{artistList}</div>
@@ -104,6 +103,7 @@ export default class App extends Component {
 						<div className="settings ui tab" data-tab="settings">{settings}</div>
 					</div>
 				</div>
+				<Links />
 				{messages}
 			</div>
 		);
@@ -190,15 +190,13 @@ class Links extends Component {
 	render() {
 		return (
 			<div className="links">
-				<a className="repo-link upstream" href={UPSTREAM_URL} title={UPSTREAM_LABEL}>
+				<a className="repo-link upstream" href={UPSTREAM_URL} title={t('app.upstream') + ' · ' + UPSTREAM_LABEL}>
 					<i className="github icon"></i>
-					<span>{t('app.upstream')}</span>
 					<span className="repo-name">{UPSTREAM_LABEL}</span>
 				</a>
 				<span className="repo-sep">→</span>
-				<a className="repo-link fork" href={REPO_URL} title={REPO_LABEL}>
+				<a className="repo-link fork" href={REPO_URL} title={t('app.thisRepo') + ' · ' + REPO_LABEL}>
 					<i className="github icon"></i>
-					<span>{t('app.thisRepo')}</span>
 					<span className="repo-name">{REPO_LABEL}</span>
 				</a>
 			</div>

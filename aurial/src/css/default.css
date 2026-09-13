@@ -102,6 +102,7 @@
 		position: absolute;
 		top: 0; right: 0; bottom: 0; left: 0;
 		overflow: auto;
+		padding-bottom: 32px;
 	}
 
 	.playlist-selection .selectionView .item .header .artist {
@@ -133,21 +134,24 @@
 		position: absolute;
 		top: 51px; right: 0; bottom:0; left: 0;
 		overflow: auto;
+		padding-bottom: 32px;
 	}
 
 	.playlist-playing .queueView {
 		position: absolute;
 		top: 0; right: 0; bottom: 0; left: 0;
 		overflow: auto;
+		padding-bottom: 32px;
 	}
 
 	.ui.small.modal .image.content .description {
 		width: 100%;
 	}
 
+	/* 消息提示上移，给贴底的页脚署名让位（页脚高约 24.5px），避免相互遮挡 */
 	.messages {
 		position: absolute;
-		right: 10px; bottom: 10px;
+		right: 10px; bottom: 36px;
 		width: 400px;
 	}
 
@@ -157,12 +161,18 @@
 		animation-iteration-count: 1;
 	}
 
+	/* 页脚署名：贴底右对齐的细条，不再压在播放器上；
+	   内容区滚动容器补了等高的 padding-bottom，所以不会永久遮住最后一行 */
 	.links {
 		position: absolute;
-		top: 0;
+		left: 380px;
 		right: 0;
-		padding: 5px;
+		bottom: 0;
+		padding: 3px 10px 4px;
+		text-align: right;
 		z-index: 10000;
+		white-space: nowrap;
+		overflow-x: auto;
 	}
 
 	@keyframes fate-out {
@@ -623,6 +633,13 @@
 		min-width: 520px;
 	}
 
+	/* 页脚署名：正常流最末、居中弱化，不再占顶部版面 */
+	.links {
+		padding: 10px 4px 14px;
+		text-align: center;
+		line-height: 1.9;
+	}
+
 	.messages {
 		position: fixed;
 		left: 8px;
@@ -647,13 +664,13 @@
 }
 .artistList .subsonic-hint .icon { margin-right: .35em; }
 
-/* 页头署名：上游弱化显示，本仓库强调，两者用箭头连接，一眼可辨 */
+/* 页脚署名：整体弱化，上游弱/本仓库稍显，箭头连接，一眼可辨 */
+.links { font-size: .78em; opacity: .55; line-height: 1.6; }
 .links .repo-link { text-decoration: none; }
-.links .repo-link .repo-name { margin-left: .35em; }
-.links .repo-link.upstream { opacity: .62; font-size: .92em; }
-.links .repo-link.upstream .repo-name { font-weight: 400; }
+.links .repo-link .repo-name { margin-left: .25em; }
+.links .repo-link.upstream { opacity: .8; }
 .links .repo-link.fork { font-weight: 600; }
-.links .repo-sep { margin: 0 .5em; opacity: .5; }
+.links .repo-sep { margin: 0 .4em; opacity: .6; }
 
 /* 设置页「关于」 */
 .about-box { line-height: 1.7; }
