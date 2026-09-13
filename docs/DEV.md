@@ -52,6 +52,17 @@ cd aurial && NODE_OPTIONS=--openssl-legacy-provider npm run dist
 6. `git tag -a vX.Y.Z && git push origin vX.Y.Z`
 7. `gh release create vX.Y.Z --repo DragonTTDream/aurmpd-jukebox --title "…" --notes-file … <两个包>`
 
+## 省 token 工作法
+
+改本项目时的默认做法（上下文大小比模型单价更影响成本）：
+
+1. **先读本文件**，再看 `FEATURES.md` 的相关章节；不要重新探索仓库树
+2. **新任务新会话**；本项目的改动一次一收尾，不要在同一个会话里做一整天
+3. **重活派子会话**（`context="isolated"`）；子会话只接一个明确目标 + 验收标准
+4. **大输出落文件**：构建日志/压测输出写 `/tmp/*.log`，只在汇报里贴结论与关键数字
+5. **机械活可交本地模型**（用户 4070 Ti Super / Ollama `gpt-oss:20b`）；难题用云端模型
+6. 汇报格式：改动清单（`file:line`）+ 验证数字 + 未验证项，不贴大段原文
+
 ## 踩过的坑（别重复）
 
 | 坑 | 规避 |
